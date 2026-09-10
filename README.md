@@ -1,4 +1,4 @@
-# robot_countGride  Robot Mission (e33)
+# robot_countGride  Robot Mission 
 
 Arduino sketch for a line-following robot with a gripper arm
 
