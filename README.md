@@ -1,8 +1,6 @@
-# robot_countGride — Robot Mission (e33)
+# robot_countGride  Robot Mission (e33)
 
-Arduino sketch for a line-following robot with a gripper arm, built for the
-`e33.pdf` worksheet. The library code is transcribed from the course slides
-`robot08` – `robot11`.
+Arduino sketch for a line-following robot with a gripper arm
 
 ## Files
 
