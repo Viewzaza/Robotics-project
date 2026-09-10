@@ -1,5 +1,7 @@
 /* controlLibrary.h
- * ถอดมาจากสไลด์ robot11 (สรุปวงจรและโค้ด) หน้า 3 - 20
+ * Transcribed from slide deck robot11 ("circuit and code summary"),
+ * pages 3-20. The Thai comments from the slides are kept in brackets
+ * after the English so this file can still be diffed against the source.
  */
 
 #include <Servo.h>
@@ -35,13 +37,13 @@ int countGrid(int n);
 void stopRobot();
 void upSpeed();
 void moveFor();
-void turnRight90();   //เลี้ยวขวา 90 องศา
-void turnLeft90();    //เลี้ยวซ้าย 90 องศา
-void turnRight180();  //เลี้ยวขวา 180 องศา
-void turnLeft180();   //เลี้ยวซ้าย 180 องศา
+void turnRight90();   //turn right 90 degrees   (เลี้ยวขวา 90 องศา)
+void turnLeft90();    //turn left 90 degrees    (เลี้ยวซ้าย 90 องศา)
+void turnRight180();  //turn right 180 degrees  (เลี้ยวขวา 180 องศา)
+void turnLeft180();   //turn left 180 degrees   (เลี้ยวซ้าย 180 องศา)
 void keepup_object();
 void put_object();
-void arm_over_head(); //ยกแขนสูง
+void arm_over_head(); //raise the arm high      (ยกแขนสูง)
 
 void beginFnc(){
   pinMode(sp_L,OUTPUT); pinMode(F_L,OUTPUT); pinMode(B_L,OUTPUT);
@@ -49,10 +51,10 @@ void beginFnc(){
   pinMode(STBY,OUTPUT);
   delay(1000);
 
-  servo_x.attach(x_pin);//เชื่อมต่อขาสัญญาณ
-  servo_y.attach(y_pin);//เชื่อมต่อขาสัญญาณ
-  servo_x.write(140);//คลายแขนจับ
-  servo_y.write(105);//ยกแขนลง
+  servo_x.attach(x_pin);//attach signal pin      (เชื่อมต่อขาสัญญาณ)
+  servo_y.attach(y_pin);//attach signal pin      (เชื่อมต่อขาสัญญาณ)
+  servo_x.write(140);//open the gripper          (คลายแขนจับ)
+  servo_y.write(105);//lower the arm             (ยกแขนลง)
 
   digitalWrite(STBY,1);
   clearPid();
@@ -87,7 +89,7 @@ int getErrorInput(String L){
   else if(L == "00000111"){e = 5;}
   else if(L == "00000011"){e = 6;}
   else if(L == "00000001"){e = 7;}
-  else{e = 100;}
+  else{e = 100;}          //line lost
   return(e);
 }
 
@@ -110,6 +112,7 @@ void followLine(){
   }
 }
 
+//true when at least half the sensor bar sees the line, i.e. a crossing line
 bool checkGrid(){
   String ch = getSensor();
   if(ch == "00001111" || ch == "00011111" || ch == "00111111"
@@ -123,10 +126,10 @@ bool checkGrid(){
 
 int countGrid(int n){
   if(checkGrid()){
-    delay(10);
+    delay(10);            //debounce
     if(checkGrid()){
       n ++;
-      while(checkGrid());
+      while(checkGrid());  //wait until the crossing has been driven over
     }
   }
   return (n);
@@ -135,9 +138,10 @@ int countGrid(int n){
 void stopRobot(){
   digitalWrite(F_L,1); digitalWrite(B_L,1);
   digitalWrite(F_R,1); digitalWrite(B_R,1);
-  sp = 50;
+  sp = 50;                //reset to the starting speed
 }
 
+//ramp the speed up by 2 every 10 ms, capped at maxSp
 void upSpeed(){
   if(millis()-tUpSp >= 10){
     sp += 2;
@@ -151,6 +155,7 @@ void moveFor(){
   digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,sp);
 }
 
+//spin right until the line reaches the right-hand end of the sensor bar
 void turnRight90(){
   String ch;
   while(true){
@@ -164,6 +169,7 @@ void turnRight90(){
   }
 }
 
+//spin left until the line reaches the left-hand end of the sensor bar
 void turnLeft90(){
   String ch;
   while(true){
@@ -177,6 +183,7 @@ void turnLeft90(){
   }
 }
 
+//two right 90s back to back, waiting in between until the line is left behind
 void turnRight180(){
   turnRight90();
   String ch;
@@ -189,6 +196,7 @@ void turnRight180(){
   turnRight90();
 }
 
+//two left 90s back to back, waiting in between until the line is left behind
 void turnLeft180(){
   turnLeft90();
   String ch;
@@ -202,16 +210,16 @@ void turnLeft180(){
 }
 
 void keepup_object(){
-  servo_x.write(65);//หนีบของ
+  servo_x.write(65);//grip the object            (หนีบของ)
   delay(500);
-  servo_y.write(90);//ยกของ
+  servo_y.write(90);//lift the object            (ยกของ)
   delay(500);
 }
 
 void put_object(){
-  servo_y.write(105);//วางของลง
+  servo_y.write(105);//lower the object down     (วางของลง)
   delay(500);
-  servo_x.write(149);//คลายแขนหนีบ
+  servo_x.write(149);//open the gripper          (คลายแขนหนีบ)
   delay(500);
 }
 
