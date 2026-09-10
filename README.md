@@ -1,4 +1,4 @@
-# robot_countGride — ภารกิจ Robot (e33)
+# robot_countGride  ภารกิจ Robot (e33)
 
 Arduino sketch สำหรับหุ่นยนต์เดินตามเส้น + แขนหนีบ ตามใบงาน `e33.pdf`
 โค้ดไลบรารีถอดมาจากสไลด์ `robot08` – `robot11` (อาจารย์ ธนากรณ์ ทิงพลงษา)
