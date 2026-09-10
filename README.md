@@ -1,25 +1,26 @@
-# robot_countGride  ภารกิจ Robot (e33)
+# robot_countGride — Robot Mission (e33)
 
-Arduino sketch สำหรับหุ่นยนต์เดินตามเส้น + แขนหนีบ ตามใบงาน `e33.pdf`
-โค้ดไลบรารีถอดมาจากสไลด์ `robot08` – `robot11` (อาจารย์ ธนากรณ์ ทิงพลงษา)
+Arduino sketch for a line-following robot with a gripper arm, built for the
+`e33.pdf` worksheet. The library code is transcribed from the course slides
+`robot08` – `robot11`.
 
-## ไฟล์
+## Files
 
-| ไฟล์ | ที่มา |
+| File | Source |
 |---|---|
-| `robot_countGride/robot_countGride.ino` | โปรแกรมภารกิจ (เขียนใหม่ให้ตรงกับสนามใน `e33.pdf`) |
-| `robot_countGride/controlLibrary.h` | ถอดจาก `robot11.pdf` หน้า 3–20 |
-| `robot_countGride/pidLibrary.h` | ไฟล์จากอาจารย์ (Google Drive) |
+| `robot_countGride/robot_countGride.ino` | Mission program (written for the field in `e33.pdf`) |
+| `robot_countGride/controlLibrary.h` | Transcribed from `robot11.pdf`, pages 3–20 |
+| `robot_countGride/pidLibrary.h` | Provided with the course material |
 
-เปิดด้วย Arduino IDE ที่ `robot_countGride/robot_countGride.ino`
+Open `robot_countGride/robot_countGride.ino` in the Arduino IDE.
 
-## บอร์ด
+## Board
 
-ต้องเป็น **Arduino Nano / Pro Mini** เพราะโค้ดใช้เซนเซอร์ 8 ตัวที่ `A0`–`A7`
-(Uno แบบ DIP ไม่มีขา A6, A7 จริง — คอมไพล์ผ่านแต่ค่าที่อ่านได้จะเป็นขยะ)
-ต้องมีไลบรารี `Servo`
+Must be an **Arduino Nano / Pro Mini**, because the code reads eight sensors on
+`A0`–`A7`. A DIP Uno has no physical A6/A7 pins — it compiles, but those two
+readings are garbage. The `Servo` library is required.
 
-## สนามและภารกิจ
+## Field and mission
 
 ```
         o1                                  o3
@@ -32,76 +33,91 @@ Arduino sketch สำหรับหุ่นยนต์เดินตาม�
         C1      C2      C3      C4
 ```
 
-`o` = วัตถุ, `x` = ตำแหน่งวาง, `[R]>` = จุดเริ่มต้น (บนเส้นกลางที่ C1 หันหน้าไปทางขวา)
+`o` = object, `x` = drop position, `[R]>` = start position (on the middle line
+at C1, facing right).
 
-| วัตถุ | อยู่ที่ | ต้องไปวางที่ |
+| Object | Located at | Must be placed at |
 |---|---|---|
-| o1 | บนสุดของ C1 | x1 = ล่างสุดของ C4 |
-| o2 | ล่างสุดของ C1 | x2 = ล่างสุดของ C3 |
-| o3 | บนสุดของ C4 | x3 = ล่างสุดของ C2 |
+| o1 | top of C1 | x1 = bottom of C4 |
+| o2 | bottom of C1 | x2 = bottom of C3 |
+| o3 | top of C4 | x3 = bottom of C2 |
 
-โจทย์ให้เริ่มหยิบหมายเลขใดก่อนก็ได้ โปรแกรมนี้ทำลำดับ **3 → 1 → 2**
-เพราะหุ่นเริ่มต้นหันหน้าไปทางขวา จึงเก็บ o3 ที่อยู่ขวาสุดก่อน
+The worksheet allows starting with any object number. This program runs the
+order **3 → 1 → 2**, because the robot starts facing right and o3 is the
+right-most object.
 
-## หลักการนับ numGride
+## How numGride is counted
 
-* `countGrid()` บวก 1 ทุกครั้งที่เจอเส้นตัด
-* จุดที่หุ่นยืนอยู่ตอนเริ่ม `(C1,MID)` **ไม่ถูกนับ** เส้นตัดแรกที่เจอคือ 1
-* ทุก `case` ที่มีคำสั่งจะ `numGride++` เพิ่มอีก 1 → เลข case จึงกระโดดข้าม
+* `countGrid()` adds 1 every time a crossing line is detected.
+* The intersection the robot starts on, `(C1,MID)`, is **not** counted — the
+  first crossing it meets is 1.
+* Every `case` that performs an action also does `numGride++`, so the case
+  numbers skip.
 
-(หลักการเดียวกับตัวอย่างในสไลด์ robot08 หน้า 10–11 และ robot10)
+(Same convention as the worked examples in `robot08` pages 10–11 and `robot10`.)
 
-## ตารางเส้นทาง
+## Route table
 
-| n | จุด | ทิศ ก่อน→หลัง | คำสั่ง |
+| n | Point | Heading before → after | Action |
 |---|---|---|---|
 | 1 | (C2,MID) | E | followLine |
 | 2 | (C3,MID) | E | followLine |
 | 3 | (C4,MID) | E → N | `turn90("LEFT")` |
-| 5 | (C4,TOP) | N → S | `keep_item` หยิบวัตถุ 3 |
+| 5 | (C4,TOP) | N → S | `keep_item` — pick object 3 |
 | 7 | (C4,MID) | S → W | `turn90("RIGHT")` |
 | 9 | (C3,MID) | W | followLine |
 | 10 | (C2,MID) | W → S | `turn90("LEFT")` |
-| 12 | (C2,BOT) | S → N | `place_item` วางวัตถุ 3 ที่ x3 |
+| 12 | (C2,BOT) | S → N | `place_item` — drop object 3 at x3 |
 | 14 | (C2,MID) | N → W | `turn90("LEFT")` |
 | 16 | (C1,MID) | W → N | `turn90("RIGHT")` |
-| 18 | (C1,TOP) | N → S | `keep_item` หยิบวัตถุ 1 |
+| 18 | (C1,TOP) | N → S | `keep_item` — pick object 1 |
 | 20 | (C1,MID) | S → E | `turn90("LEFT")` |
 | 22 | (C2,MID) | E | followLine |
 | 23 | (C3,MID) | E | followLine |
 | 24 | (C4,MID) | E → S | `turn90("RIGHT")` |
-| 26 | (C4,BOT) | S → N | `place_item` วางวัตถุ 1 ที่ x1 |
+| 26 | (C4,BOT) | S → N | `place_item` — drop object 1 at x1 |
 | 28 | (C4,MID) | N → W | `turn90("LEFT")` |
 | 30 | (C3,MID) | W | followLine |
 | 31 | (C2,MID) | W | followLine |
 | 32 | (C1,MID) | W → S | `turn90("LEFT")` |
-| 34 | (C1,BOT) | S → N | `keep_item` หยิบวัตถุ 2 |
+| 34 | (C1,BOT) | S → N | `keep_item` — pick object 2 |
 | 36 | (C1,MID) | N → E | `turn90("RIGHT")` |
 | 38 | (C2,MID) | E | followLine |
 | 39 | (C3,MID) | E → S | `turn90("RIGHT")` |
-| 41 | (C3,BOT) | S | `place_item("STOP")` วางวัตถุ 2 ที่ x2 |
-| 42 | — | — | จบภารกิจ → `stopRobot()` |
+| 41 | (C3,BOT) | S | `place_item("STOP")` — drop object 2 at x2 |
+| 42 | — | — | mission complete → `stopRobot()` |
 
-## จุดที่ต้องปรับจูนหน้างาน
+The route never travels along the bottom line, so it cannot disturb objects it
+has already placed.
 
-แก้ที่หัวไฟล์ `.ino`
+## Tuning on the field
 
-| ค่า | ความหมาย |
+Edit these at the top of the `.ino`:
+
+| Value | Meaning |
 |---|---|
-| `NUDGE_TURN` (50) | ms ที่เดินหน้าเลยจุดตัดก่อนจะเลี้ยว — หุ่นเลี้ยวเร็ว/ช้าเกินไปให้แก้ค่านี้ |
-| `NUDGE_PICK` (50) | ms ที่เดินเข้าหาวัตถุก่อนหนีบ — หนีบไม่ติด/ชนของให้แก้ค่านี้ |
-| `NUDGE_PLACE` (30) | ms ที่เดินหน้าก่อนวางวัตถุ |
+| `NUDGE_TURN` (50) | ms driven past an intersection before turning — adjust if the robot turns too early or too late |
+| `NUDGE_PICK` (50) | ms driven toward the object before gripping — adjust if it misses the object or pushes it away |
+| `NUDGE_PLACE` (30) | ms driven forward before releasing the object |
 
-ค่าอื่นที่มักต้องจูน (อยู่ใน `controlLibrary.h`)
+Other values that usually need tuning, in `controlLibrary.h`:
 
-* `analogRead(...) >= 500` ใน `getSensor()` — ค่าแบ่งขาว/ดำ
-* `maxSp = 255` — ถ้าหุ่นเร็วเกินจนหลุดโค้งหรือเลยจุดตัด ให้ลดลง เช่น 150
-* `pidFNC(errorInput, 0, 1, 0, 0.7)` ใน `followLine()` — kp / ki / kd
-* มุมเซอร์โวใน `keepup_object()`, `put_object()`, `arm_over_head()`
+* `analogRead(...) >= 500` in `getSensor()` — the black/white threshold
+* `maxSp = 255` — lower it (e.g. 150) if the robot is too fast and loses the
+  line or overshoots intersections
+* `pidFNC(errorInput, 0, 1, 0, 0.7)` in `followLine()` — kp / ki / kd
+* servo angles in `keepup_object()`, `put_object()`, `arm_over_head()`
 
-## สิ่งที่เพิ่มเข้ามาเองนอกจากในสไลด์
+## Additions beyond the slides
 
-`leaveGride()` ใน `.ino` — หลังเลี้ยวเสร็จ หุ่นอาจยังคร่อมเส้นตัดเดิมอยู่
-ถ้าปล่อยไว้ `countGrid()` จะนับจุดเดิมซ้ำ และ `while(checkGrid())` ข้างในจะค้าง
-เพราะล้อถูกเบรกอยู่ (หุ่นจะหยุดนิ่งกลางสนาม) ฟังก์ชันนี้จึงคลานไปข้างหน้าช้า ๆ
-จนพ้นเส้นตัดก่อน แล้วค่อยกลับไปเดินตามเส้นต่อ
+`leaveGride()` in the `.ino`. After a turn completes, the robot can still be
+straddling the intersection it just used. Left alone, `countGrid()` counts that
+same intersection twice, and its internal `while(checkGrid())` never exits
+because `stopRobot()` has already braked the wheels — the robot freezes in the
+middle of the field. This function creeps forward slowly until the crossing is
+clear, then hands control back to line following.
+
+`followLine()` also keeps the `round()` from `robot08` page 4:
+`map(round(pidOut), -7, 7, -sp, sp)`. The summary slide in `robot11` drops it,
+but without `round()` the float truncates toward zero and steering becomes
+asymmetric.
