@@ -24,10 +24,22 @@ static uint8_t g_lastBranches = 0;
 static uint8_t g_junctionMask = 0;
 static bool    g_inJunction = false;
 
-/* Half the width of a crossing line, expressed in ODOMETRY cm -- see
- * countGrid(). Seeded with the nominal tape half-width and then re-measured
- * every time the robot drives straight through a junction. */
-static float   g_crossHalfCm = LINE_HALF_W_CM;
+/* Odometer reading when the bar first went fully over a crossing, and whether
+ * that crossing is still a clean measurement of the tape width -- it stops
+ * being one the moment a mission action brakes or pivots part-way through. */
+static float   g_odoJunctionIn = 0;
+static bool    g_dwellArmed    = false;
+
+/* Half a tape width, in cm. A junction is declared the moment the bar's LEADING
+ * EDGE reaches the tape, which is half a width before the bar is over its
+ * centre, so every distance worked out from a junction is biased short by this.
+ *
+ * It used to be estimated separately, in odometry cm, so that the estimate
+ * would cancel a wrong speed calibration. measureScale() now corrects the
+ * odometry scale itself from the same crossing-dwell measurement, so odometry
+ * cm ARE real cm and half the measured tape width is simply the right answer.
+ * One estimator instead of two doing the same job. */
+static const float g_crossHalfCm = LINE_WIDTH_CM * 0.5f;
 
 static float cmSinceJunction() { return g_odoCm - g_odoAtJunction; }
 
@@ -173,6 +185,7 @@ int countGrid(int n) {
   bool now = isJunction(g_mask);
 
   if (now && !g_inJunction) {
+    float odoIn = g_odoCm;                        /* before the debounce wait */
     uint32_t t0 = millis();
     while ((uint32_t)(millis() - t0) < JUNCTION_DEBOUNCE_MS) {
       if (!isJunction(readMask())) return n;      /* a glitch, not a junction */
@@ -182,23 +195,19 @@ int countGrid(int n) {
     g_inJunction   = true;
     g_junctionMask = g_mask;
     g_lastBranches = branchesOf(g_mask);
+    g_odoJunctionIn = odoIn;
+    g_dwellArmed    = true;
     g_odoAtJunction = g_odoCm;                    /* position fix */
     return n + 1;
   }
   if (!now) {
-    /* Falling edge: the bar has just cleared the tape. The robot entered the
-     * crossing at g_odoAtJunction and leaves it here, so half that span is how
-     * far the junction fix sits BEFORE the centre of the line. Junctions the
-     * route drives straight through -- there are ten of them before the last
-     * pick -- measure it for free, with no extra motion and no new hardware.
-     * Junctions the robot stops on are skipped, because braking mid-crossing
-     * would report a half-width that is far too small. */
-    if (g_inJunction) {
-      float w = cmSinceJunction();
-      if (w > 0.2f && w < 4.0f)
-        g_crossHalfCm += 0.5f * (0.5f * w - g_crossHalfCm);   /* slow filter */
-    }
-    g_inJunction = false;
+    /* Trailing edge. If the robot rolled straight through -- no action braked
+     * or pivoted part-way -- then the ground covered between the two edges is
+     * the tape width, and the odometer's opinion of it calibrates the odometer.
+     * See measureScale() in hal.h. */
+    if (g_inJunction && g_dwellArmed) measureScale(g_odoCm - g_odoJunctionIn);
+    g_inJunction  = false;
+    g_dwellArmed  = false;
   }
   return n;
 }

@@ -121,6 +121,42 @@
 /* A junction is declared when at least this many sensors see line at once. */
 #define JUNCTION_MIN_BITS   5
 
+/* ------------------------------------------------- self-calibrating scale -- */
+/* Width of the tape, cm. MEASURE ME -- lay a ruler across a line.
+ *
+ * This is the one ABSOLUTE length the robot can see for itself. Every other
+ * length it deals with (cell pitch, how far past the line an object sits) is a
+ * property of a field it has never seen. The tape it drives on is the ruler it
+ * carries with it: while the bar sweeps across a line at right angles, every
+ * sensor is lit at once, and the ground the wheels cover during that window IS
+ * the tape width. Comparing that with the distance the odometer THINKS it
+ * covered gives the odometer's scale error directly -- no encoder needed.
+ *
+ * That single number is what the whole mission hangs on. CM_PER_S_AT_CAL is
+ * calibrated on one battery at one moment; a fresh cell or a sagging one moves
+ * the true speed by +-30 percent, which scales every advanceCm() AND every
+ * timed pivot by the same factor. A 90 degree turn becomes a 66 degree turn and
+ * the robot drives off the field. */
+#define LINE_WIDTH_CM     1.8f
+
+/* Only believe a dwell measurement inside this band, as a multiple of
+ * LINE_WIDTH_CM. Outside it the bar was skewed, or clipped a corner, or the
+ * robot was braking mid-junction. */
+#define SCALE_MEAS_MIN    0.30f
+#define SCALE_MEAS_MAX    4.00f
+
+/* How much of each measured error to apply. The first fix is nearly complete
+ * because there are only two pass-through crossings before the first turn, and
+ * the turn is what a scale error destroys. Later fixes are damped, because by
+ * then the estimate is close and the measurement noise is not. */
+#define SCALE_GAIN_FIRST  0.90f
+#define SCALE_GAIN_LATER  0.50f
+
+/* Hard bounds on the cumulative correction, so one wild measurement can never
+ * leave the robot with a calibration it cannot drive on. */
+#define SCALE_CLAMP_LO    0.35f
+#define SCALE_CLAMP_HI    2.60f
+
 /* Debounce: a junction must persist this long to count, and the robot must
  * then travel this far before another junction can be counted. */
 #define JUNCTION_DEBOUNCE_MS   12

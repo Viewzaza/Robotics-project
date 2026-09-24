@@ -179,6 +179,57 @@ static void odoTick() {
   g_odoCm += cmPerS(fwd) * (dt * 1e-6f);
 }
 
+/* ==================================================== online scale estimate ==
+ * The odometer is open loop: it integrates the speed the CALIBRATION says the
+ * commanded duty produces. If the real speed differs -- a fresh battery, a cold
+ * gearbox, a different surface -- then every distance is wrong by that factor,
+ * and so is every timed pivot, because MS_PER_90DEG is a time and the angle it
+ * sweeps is proportional to wheel speed. A 25 percent slow battery turns a
+ * 90 degree turn into a 66 degree one, which is unrecoverable.
+ *
+ * measureScale() is handed the distance the odometer THINKS the robot rolled
+ * while the bar was completely over a crossing line. The truth is the tape
+ * width. The ratio is the scale error, and correcting cmPerSAtCal and msPer90
+ * by it fixes the distances and the turns in one step.
+ *
+ * It is self-extinguishing: once the calibration is right the next measurement
+ * reads LINE_WIDTH_CM and asks for no change, so it can be left running for the
+ * whole mission and will track a battery that sags as it goes.
+ */
+static uint8_t g_scaleFixes = 0;
+static float   g_scaleTotal = 1.0f;     /* cumulative correction, for telemetry */
+
+static void measureScale(float dwellCm) {
+  if (dwellCm < LINE_WIDTH_CM * SCALE_MEAS_MIN) return;
+  if (dwellCm > LINE_WIDTH_CM * SCALE_MEAS_MAX) return;
+
+  float s = dwellCm / LINE_WIDTH_CM;              /* odometer over-reads by s */
+  float gain = (g_scaleFixes == 0) ? SCALE_GAIN_FIRST : SCALE_GAIN_LATER;
+  float corr = 1.0f + (s - 1.0f) * gain;
+  if (corr < 0.5f) corr = 0.5f;
+  if (corr > 2.0f) corr = 2.0f;
+
+  float total = g_scaleTotal * corr;
+  if (total < SCALE_CLAMP_LO || total > SCALE_CLAMP_HI) return;
+  g_scaleTotal = total;
+
+  /* odometer reads high by corr  ->  it believes the robot is faster than it
+   * is  ->  divide the speed constant; and the true time for 90 degrees is
+   * longer by the same factor. */
+  g_cal.cmPerSAtCal /= corr;
+  uint32_t m = (uint32_t)((float)g_cal.msPer90 * corr);
+  if (m < 150ul)  m = 150ul;
+  if (m > 3000ul) m = 3000ul;
+  g_cal.msPer90 = (uint16_t)m;
+  g_scaleFixes++;
+
+#if !defined(__AVR__) && defined(SIM_DEBUG)
+  printf("      SCALE dwell=%.2f corr=%.3f total=%.3f cmps=%.2f ms90=%d\n",
+         (double)dwellCm, (double)corr, (double)g_scaleTotal,
+         (double)g_cal.cmPerSAtCal, (int)g_cal.msPer90);
+#endif
+}
+
 /* ==================================================================== motors */
 
 static void motorsRaw(int16_t l, int16_t r) {

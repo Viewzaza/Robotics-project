@@ -100,15 +100,40 @@ static void missionCheckpoint();
 static void runCalibration();
 static void waitForStart();
 
-/* After pivoting about a junction the bar is already SENSOR_AHEAD_CM into the
- * next cell, so that is where the distance-to-next-junction estimate restarts.
- * Getting this right is what lets followLine() decelerate in time. */
-static void reanchor() {
-  g_odoAtJunction = g_odoCm - SENSOR_AHEAD_CM;
+/* Re-establish the distance-to-next-junction estimate after a manoeuvre.
+ * `barPast` is how far the bar now sits PAST the junction we just used, along
+ * the direction we are about to travel. Getting this right is what lets
+ * followLine() decelerate in time. */
+static void reanchorAt(float barPast) {
+  if (barPast < 0) barPast = 0;
+  g_odoAtJunction = g_odoCm - barPast;
   g_inJunction = false;
+  g_dwellArmed = false;         /* this crossing is no longer a clean ruler */
   clearPid();
   sp = DUTY_START;
   tUpSp = millis();
+}
+
+/* After a 90 degree pivot about the junction the new direction of travel is
+ * perpendicular to the old one, so whatever longitudinal error the advance left
+ * becomes a LATERAL offset the line follower absorbs, and the bar is exactly
+ * SENSOR_AHEAD_CM along the new axis. */
+static void reanchor() { reanchorAt(SENSOR_AHEAD_CM); }
+
+/* After a 180 degree turnaround the new direction is ANTI-parallel, so the
+ * error does not become lateral -- it stays longitudinal and doubles up.
+ *
+ *   junction line at L, bar detects it there, so the pivot is at L - 9.5.
+ *   the action advances `adv` more, putting the pivot at L - 9.5 + adv.
+ *   after spinning 180 the bar leads again, now at L - 19 + adv.
+ *
+ * Travelling back the way we came, the bar is therefore (19 - adv) cm along
+ * the new cell already -- not 9.5. Anchoring at 9.5, as a 90 degree turn does,
+ * told followLine() there were ~7 cm more to run than there really were, so it
+ * never decelerated before the next crossing and hit it at cruise. On a 20 cm
+ * grid the next line is only ~3.5 cm away at that point. */
+static void reanchor180(float adv) {
+  reanchorAt(2.0f * SENSOR_AHEAD_CM - adv);
 }
 
 /* ===================================================================== setup */
@@ -249,13 +274,14 @@ void keep_item(String direction) {
   float lead = 0;
   if (togo > 0) { advanceCm(togo); lead = togo < g_crossHalfCm ? togo : g_crossHalfCm; }
   delay(150);
+  float adv = cmSinceJunction();          /* where the pivot really ended up */
 
   keepup_object();
 
   creepBack(lead);                   /* spin from where an uncorrected pick would have */
   if (direction == "RIGHT") turnRight180(); else turnLeft180();
   brake();
-  reanchor();
+  reanchor180(adv);
   missionCheckpoint();
 }
 
@@ -268,6 +294,7 @@ void place_item(String direction) {
   float lead = 0;
   if (togo > 0) { advanceCm(togo); lead = togo < g_crossHalfCm ? togo : g_crossHalfCm; }
   delay(150);
+  float adv = cmSinceJunction();          /* where the pivot really ended up */
 
   put_object();
 
@@ -285,7 +312,7 @@ void place_item(String direction) {
   brake();
   armTo(SERVO_ARM_DOWN);
   gripTo(SERVO_GRIP_OPEN);
-  reanchor();
+  reanchor180(adv);
   missionCheckpoint();
 }
 

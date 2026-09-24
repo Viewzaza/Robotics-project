@@ -2,7 +2,7 @@
 
 Arduino line-following robot with a gripper arm.
 
-**Simulator result: 267 of 315 test conditions complete all three placements.
+**Simulator result: 314 of 315 test conditions complete all three placements.
 The original firmware completed 0 of 315.**
 
 ## Layout
@@ -18,7 +18,7 @@ The original firmware completed 0 of 315.**
 
 Open `robot_countGride/robot_countGride.ino` in the Arduino IDE.
 Board: **Arduino Nano** (a DIP Uno has no physical A6/A7, so two sensors would
-read garbage). Needs the `Servo` library. Build: 13.3 KB flash, 428 B SRAM.
+read garbage). Needs the `Servo` library. Build: 14.2 KB flash, 439 B SRAM.
 
 ## The 9.5 cm rule
 
@@ -173,6 +173,25 @@ the middle of the bar, with a hard stop at 118%. The window is deliberately
 narrow - the bar traces a circle of radius 9.5 cm about the pivot, so it clips
 *every* line at the junction, not just the one being looked for. Widening the
 window makes turns end on the wrong line.
+
+**Self-calibrating odometry.** `CM_PER_S_AT_CAL` is measured once, on one
+battery, at one moment. A fresh cell or a sagging one moves the true speed by
+±30%, and that scales every `advanceCm()` *and* every timed pivot by the same
+factor, so a 90° turn becomes a 66° turn and the robot leaves the field. The
+robot now fixes this itself while it drives. The tape is the one absolute length
+it can see: while the bar sweeps a crossing at right angles every sensor is lit,
+and the ground covered during that window is one tape width. Comparing that with
+what the odometer thought it covered gives the scale error directly, with no
+encoder. Measured on the sweep this is worth 274/315 → 314/315, because it
+repairs the exact failure a wrong speed calibration causes.
+
+**The 180° turnaround anchor.** After a 90° pivot the leftover advance error
+becomes a lateral offset the line follower absorbs. After a 180° turnaround the
+new heading is anti-parallel, so the error stays longitudinal and doubles:
+the bar ends up `2 × 9.5 − advance` into the next cell, not 9.5. Anchoring it at
+9.5 told `followLine()` there were about 7 cm more to run than there were, so it
+never decelerated and hit the next crossing at cruise. On a 20 cm grid that next
+line is only ~3.5 cm away.
 
 **PID.** `dt` could be zero when two calls landed in the same millisecond, and
 the derivative term divided by it. Also guarded: the first call after
