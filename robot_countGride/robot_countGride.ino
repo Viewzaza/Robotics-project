@@ -187,16 +187,33 @@ void turn90(String direction) {
  *     SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM
  * for the jaws to close around the object. With 9.5 + 5.0 - 12.0 that is
  * 2.5 cm; if your gripper reaches further than the bar sees, it goes negative
- * and the robot correctly stops short. */
+ * and the robot correctly stops short.
+ *
+ * The advance is measured from the CENTRE of the outer line -- cmPastJunction()
+ * rather than cmSinceJunction() -- because a junction is declared when the bar's
+ * leading edge reaches the tape, half a tape-width early. That is worth a flat
+ * 0.9 cm of extra reach on every pick, which is most of the margin a gripper
+ * that is 1 cm shorter than GRIP_REACH_CM needs.
+ *
+ * It is then given straight back, by creepBack(), BEFORE the robot spins. The
+ * pivot is already only about cell-7 cm inside the outer line, and the bar
+ * sweeps a circle of radius SENSOR_AHEAD_CM about the pivot, so pushing the
+ * pivot a further centimetre towards that line widens the arc over which the
+ * bar sits squarely on it -- and pivotDeg() then ends the 180 on the outer line
+ * instead of the column line and the robot leaves the field. Measured: taking
+ * the extra reach without giving it back costs 240/315 against a 267 baseline.
+ * Reaching further to grip and backing off to turn keeps both. */
 void keep_item(String direction) {
   float want = SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM;
-  float togo = want - cmSinceJunction();
+  float togo = want - cmPastJunction();
   brake();
-  if (togo > 0) advanceCm(togo);
+  float lead = 0;
+  if (togo > 0) { advanceCm(togo); lead = togo < g_crossHalfCm ? togo : g_crossHalfCm; }
   delay(150);
 
   keepup_object();
 
+  creepBack(lead);                   /* spin from where an uncorrected pick would have */
   if (direction == "RIGHT") turnRight180(); else turnLeft180();
   brake();
   reanchor();
@@ -207,9 +224,10 @@ void keep_item(String direction) {
  * "STOP" leaves the robot where it is, for the final drop. */
 void place_item(String direction) {
   float want = SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM;
-  float togo = want - cmSinceJunction();
+  float togo = want - cmPastJunction();
   brake();
-  if (togo > 0) advanceCm(togo);
+  float lead = 0;
+  if (togo > 0) { advanceCm(togo); lead = togo < g_crossHalfCm ? togo : g_crossHalfCm; }
   delay(150);
 
   put_object();
@@ -223,6 +241,7 @@ void place_item(String direction) {
   }
 
   arm_over_head();                   /* lift clear before swinging round */
+  creepBack(lead);                   /* see keep_item() */
   if (direction == "RIGHT") turnRight180(); else turnLeft180();
   brake();
   armTo(SERVO_ARM_DOWN);

@@ -331,6 +331,13 @@ static void reverseCm(float cm, int16_t duty = DUTY_PRECISE) {
   delay(40);
 }
 
+/* Give back a short advance. Same duty as advanceCm(), so the same speed model
+ * applies in both directions and the error cancels: whatever the speed
+ * calibration is wrong by, creepBack(d) undoes advanceCm(d) exactly. */
+static void creepBack(float cm) {
+  if (cm > 0.05f) reverseCm(cm);
+}
+
 /* Pivot on the spot through `deg` degrees, finishing CENTRED on the line it
  * finds. Two phases:
  *   A. spin open-loop for most of the expected time, so the line we started on

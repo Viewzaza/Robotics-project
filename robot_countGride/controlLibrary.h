@@ -24,7 +24,28 @@ static uint8_t g_lastBranches = 0;
 static uint8_t g_junctionMask = 0;
 static bool    g_inJunction = false;
 
+/* Half the width of a crossing line, expressed in ODOMETRY cm -- see
+ * countGrid(). Seeded with the nominal tape half-width and then re-measured
+ * every time the robot drives straight through a junction. */
+static float   g_crossHalfCm = LINE_HALF_W_CM;
+
 static float cmSinceJunction() { return g_odoCm - g_odoAtJunction; }
+
+/* How far the SENSOR BAR is past the CENTRE of the crossing line.
+ *
+ * cmSinceJunction() is measured from the moment the junction was declared, and
+ * that moment is not the centre of the tape: the bar declares a junction as
+ * soon as its leading edge reaches the tape, which is half a tape-width BEFORE
+ * the centre. Every distance the mission works out from a junction -- the 9.5 cm
+ * advance before a pivot, and the advance that puts the jaws on the object --
+ * was therefore biased short by that half-width. Measured on the simulator the
+ * bias is a flat 0.9 cm on every single manoeuvre of the run.
+ *
+ * g_crossHalfCm is carried in odometry cm rather than real cm on purpose. If
+ * the speed calibration is wrong by a factor k, odometry cm are wrong by the
+ * same k, so a half-width measured in odometry cm cancels the error exactly and
+ * the correction stays right on a flat battery. */
+static float cmPastJunction() { return cmSinceJunction() - g_crossHalfCm; }
 
 /* ================================================================== startup */
 
@@ -164,7 +185,21 @@ int countGrid(int n) {
     g_odoAtJunction = g_odoCm;                    /* position fix */
     return n + 1;
   }
-  if (!now) g_inJunction = false;
+  if (!now) {
+    /* Falling edge: the bar has just cleared the tape. The robot entered the
+     * crossing at g_odoAtJunction and leaves it here, so half that span is how
+     * far the junction fix sits BEFORE the centre of the line. Junctions the
+     * route drives straight through -- there are ten of them before the last
+     * pick -- measure it for free, with no extra motion and no new hardware.
+     * Junctions the robot stops on are skipped, because braking mid-crossing
+     * would report a half-width that is far too small. */
+    if (g_inJunction) {
+      float w = cmSinceJunction();
+      if (w > 0.2f && w < 4.0f)
+        g_crossHalfCm += 0.5f * (0.5f * w - g_crossHalfCm);   /* slow filter */
+    }
+    g_inJunction = false;
+  }
   return n;
 }
 

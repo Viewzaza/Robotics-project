@@ -45,6 +45,14 @@
 /* How far past the outer line the objects and targets sit, cm. MEASURE ME. */
 #define OBJECT_BEYOND_CM  5.0f
 
+/* Half the width of the line tape, cm. 19 mm electrical tape -> 0.95.
+ * This is only the STARTING guess: the firmware re-measures it every time it
+ * drives straight through a junction. It matters because a junction is declared
+ * when the bar's leading edge reaches the tape, not when the bar is over the
+ * centre of it, so every distance measured from a junction is short by this
+ * much until it is corrected. MEASURE ME (or just let the robot do it). */
+#define LINE_HALF_W_CM    0.9f
+
 /* ----------------------------------------------------------------- speed -- */
 /* Forward speed in cm/s at DUTY_CAL. This is THE calibration constant for all
  * distance work. Measure it with calibration mode: the robot drives straight
@@ -162,5 +170,7 @@
  * reset-loops on a watchdog reset. Turn on ONLY if your board has a current
  * bootloader. See README. */
 #define ENABLE_WATCHDOG        0
+
+
 
 #endif
