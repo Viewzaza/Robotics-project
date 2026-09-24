@@ -101,6 +101,14 @@ straight through by the `default:` branch.
 
 ## Bring-up order
 
+> **The numbers shipped in `config.h` are not your robot's numbers.**
+> `CM_PER_S_AT_CAL`, `MS_PER_90DEG` and `DUTY_DEADBAND` were set to match the
+> simulated robot so the logic could be tested. `GRIP_REACH_CM`, `CELL_CM` and
+> `OBJECT_BEYOND_CM` are guesses. Only `SENSOR_AHEAD_CM` (9.5) is measured from
+> your actual robot. Flash it, then calibrate, then re-flash. Running the full
+> mission on the shipped numbers will send the robot to the wrong places at
+> speed.
+
 Do these in order. Do not skip to the mission.
 
 1. **Upload and open the serial monitor at 115200.** You should see `ready`.

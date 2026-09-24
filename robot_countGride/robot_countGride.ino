@@ -72,6 +72,27 @@
 
 int numGride = 0;
 
+/* Why did the chip last reset? MCUSR holds the answer, but only until something
+ * clears it, so grab it in .init3 -- before main(), before any constructor.
+ * The variable lives in .noinit so the C runtime does not zero it on the way
+ * past. If the bootloader already cleared MCUSR we read 0, which reads as "not
+ * a crash" and starts the mission fresh: the safe way to be wrong. */
+#if defined(__AVR__)
+  #define RESET_POR _BV(PORF)
+  #define RESET_EXT _BV(EXTRF)
+  #define RESET_BOR _BV(BORF)
+  #define RESET_WDT _BV(WDRF)
+  uint8_t g_resetFlags __attribute__((section(".noinit")));
+  void grabResetFlags(void) __attribute__((naked, used, section(".init3")));
+  void grabResetFlags(void) { g_resetFlags = MCUSR; MCUSR = 0; }
+#else
+  #define RESET_POR 0x01
+  #define RESET_EXT 0x02
+  #define RESET_BOR 0x04
+  #define RESET_WDT 0x08
+  uint8_t g_resetFlags = 0;      /* host simulator: always a fresh start */
+#endif
+
 void turn90(String direction);
 void keep_item(String direction);
 void place_item(String direction);
@@ -111,12 +132,30 @@ void setup() {
   /* Recover the mission step if an earlier run was cut short by a brown-out.
    * A servo stalling on a gripped object can dip the shared 5 V rail far enough
    * to reset the Nano; restarting from zero with objects already moved is
-   * unrecoverable, so the step counter is checkpointed after every action. */
+   * unrecoverable, so the step counter is checkpointed after every action.
+   *
+   * It is NOT enough to find a checkpoint and resume from it. A student testing
+   * on the bench interrupts runs constantly, and every one of those leaves a
+   * checkpoint behind. Resuming on the next power-up would have them place the
+   * robot on the start line only to watch it set off as though it were already
+   * twenty steps in. So ask the chip WHY it reset: only a brown-out or a
+   * watchdog bite is a crash. Powering up, or pressing reset, is deliberate and
+   * starts the mission over. If the bootloader cleared the flags before we could
+   * read them, g_resetFlags is 0 and we start fresh, which is the safe way to
+   * be wrong. */
+  bool crashed = (g_resetFlags & (RESET_BOR | RESET_WDT)) != 0
+              && (g_resetFlags & (RESET_POR | RESET_EXT)) == 0;
+
   uint16_t saved[2];
   EEPROM.get(EE_ADDR_CHECKPOINT, saved);
-  if (saved[0] == (uint16_t)(EE_MAGIC & 0xFFFF) && saved[1] > 0 && saved[1] < END_GRIDE) {
+  bool haveCheckpoint = (saved[0] == (uint16_t)(EE_MAGIC & 0xFFFF)
+                         && saved[1] > 0 && saved[1] < END_GRIDE);
+
+  if (crashed && haveCheckpoint) {
     numGride = (int)saved[1];
-    Serial.print(F("RESUME at numGride=")); Serial.println(numGride);
+    Serial.print(F("RESUME after brown-out at numGride=")); Serial.println(numGride);
+  } else if (haveCheckpoint) {
+    Serial.println(F("checkpoint found but this was a normal power-up: starting over"));
   }
 #endif
 
