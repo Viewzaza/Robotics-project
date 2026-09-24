@@ -5,35 +5,38 @@
  *  Field  (o = object, x = drop position, [R]> = robot start, facing right)
  *
  *          o1                                  o3
- *     ─────┬───────┬───────┬───────┬─────      <- TOP
- *          │       │       │       │
- *     ──[R]>───────┼───────┼───────┼─────      <- MID
- *          │       │       │       │
- *     ─────┴───────┴───────┴───────┴─────      <- BOT
+ *     -----+-------+-------+-------+-----      <- TOP
+ *          |       |       |       |
+ *     --[R]>-------+-------+-------+-----      <- MID
+ *          |       |       |       |
+ *     -----+-------+-------+-------+-----      <- BOT
  *          o2      x3      x2      x1
  *          C1      C2      C3      C4
  *
- *  Object                     ->  must be placed at
- *    o1 = top of C1           ->  x1 = bottom of C4
- *    o2 = bottom of C1        ->  x2 = bottom of C3
- *    o3 = top of C4           ->  x3 = bottom of C2
+ *    o1 = top of C1     -> x1 = bottom of C4
+ *    o2 = bottom of C1  -> x2 = bottom of C3
+ *    o3 = top of C4     -> x3 = bottom of C2
  *
- *  The worksheet allows starting with any object number. This program runs
- *  the order  3 -> 1 -> 2, because the robot starts facing right and o3 is
- *  the right-most object. The route never travels along the bottom line, so
- *  it cannot disturb objects it has already placed.
+ *  Order run: 3 -> 1 -> 2. The robot starts facing right, so it collects the
+ *  right-most object first, and the route never travels along the bottom line,
+ *  so it cannot disturb an object it has already placed.
  *
  * ---------------------------------------------------------------------
- *  How numGride is counted (same convention as slides robot08/09/10)
- *  - countGrid() adds 1 every time a crossing line is detected
- *  - the intersection the robot starts on, (C1,MID), is NOT counted;
- *    the first crossing it meets is 1
- *  - every case that performs an action also does numGride++, so the
- *    case numbers skip
+ *  THE 9.5 cm RULE
  *
- *  Route table
+ *  The sensor bar sits SENSOR_AHEAD_CM = 9.5 cm in front of the wheel axle,
+ *  which is the point the robot turns about. So at the instant the bar reports
+ *  a crossing, the pivot centre is still 9.5 cm short of it. Pivoting there
+ *  turns about a point 9.5 cm before the intersection and throws the robot off
+ *  the line. Every manoeuvre below therefore advances the measured remaining
+ *  distance FIRST, at a fixed low duty so it is repeatable, and only then
+ *  pivots. See turn90(), keep_item() and place_item().
+ *
+ * ---------------------------------------------------------------------
+ *  Route -- n is the value of numGride after countGrid() sees the crossing.
+ *  Action cases add 1 of their own, which is why the numbers skip.
+ *
  *  n    Point      Heading         Action
- *  ---  ---------  --------------  ------------------------------------
  *   1   (C2,MID)   E               followLine
  *   2   (C3,MID)   E               followLine
  *   3   (C4,MID)   E -> N          turn90("LEFT")
@@ -62,127 +65,265 @@
  *  42   mission complete -> stopRobot()
  * ===================================================================== */
 
+#include "config.h"
 #include "controlLibrary.h"
 
-/* ---- field tuning ---------------------------------------------------
- * If the robot turns too early or too late at an intersection, or fails to
- * grip the object, these three values are what to change.
- */
-#define NUDGE_TURN    50   // ms driven past an intersection before turning
-#define NUDGE_PICK    50   // ms driven toward the object before gripping
-#define NUDGE_PLACE   30   // ms driven forward before releasing the object
-
-#define END_GRIDE     42   // reaching this count means the mission is done
+#define END_GRIDE 42
 
 int numGride = 0;
 
 void turn90(String direction);
 void keep_item(String direction);
 void place_item(String direction);
-void leaveGride();
+static void missionCheckpoint();
+static void runCalibration();
+static void waitForStart();
 
-void setup() {
-  Serial.begin(9600);
-  beginFnc();
+/* After pivoting about a junction the bar is already SENSOR_AHEAD_CM into the
+ * next cell, so that is where the distance-to-next-junction estimate restarts.
+ * Getting this right is what lets followLine() decelerate in time. */
+static void reanchor() {
+  g_odoAtJunction = g_odoCm - SENSOR_AHEAD_CM;
+  g_inJunction = false;
+  clearPid();
+  sp = DUTY_START;
+  tUpSp = millis();
 }
 
+/* ===================================================================== setup */
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  beginFnc();
+
+  /* Holding the start button while powering up enters calibration instead of
+   * running the mission. Without a button fitted the pin idles high and this
+   * never fires, so the robot behaves exactly as before. */
+  if (digitalRead(PIN_START) == LOW) {
+    runCalibration();
+  }
+
+  if (!g_calValid) {
+    Serial.println(F("WARNING: no EEPROM calibration, using compiled defaults"));
+  }
+
+#if ENABLE_CRASH_RESUME
+  /* Recover the mission step if an earlier run was cut short by a brown-out.
+   * A servo stalling on a gripped object can dip the shared 5 V rail far enough
+   * to reset the Nano; restarting from zero with objects already moved is
+   * unrecoverable, so the step counter is checkpointed after every action. */
+  uint16_t saved[2];
+  EEPROM.get(EE_ADDR_CHECKPOINT, saved);
+  if (saved[0] == (uint16_t)(EE_MAGIC & 0xFFFF) && saved[1] > 0 && saved[1] < END_GRIDE) {
+    numGride = (int)saved[1];
+    Serial.print(F("RESUME at numGride=")); Serial.println(numGride);
+  }
+#endif
+
+  waitForStart();
+  g_odoLastUs = micros();
+  g_odoAtJunction = g_odoCm;
+}
+
+/* ====================================================================== loop */
+
 void loop() {
-  // Mission finished: hold still. Without this, countGrid() could keep
-  // counting and the default case would drive the robot off the field.
-  if (numGride >= END_GRIDE) { stopRobot(); return; }
+  if (numGride >= END_GRIDE) {
+    stopRobot();
+    digitalWrite(PIN_LED, 1);
+    return;
+  }
 
   numGride = countGrid(numGride);
+  telemetry(numGride);
 
   switch (numGride) {
 
     /* ---------- object 3: top of C4  ->  drop at x3, bottom of C2 ------- */
-    case  3: turn90("LEFT");       numGride++; break;  // (C4,MID) face north
-    case  5: keep_item("RIGHT");   numGride++; break;  // (C4,TOP) pick object 3
-    case  7: turn90("RIGHT");      numGride++; break;  // (C4,MID) face west
-    case 10: turn90("LEFT");       numGride++; break;  // (C2,MID) face south
-    case 12: place_item("RIGHT");  numGride++; break;  // (C2,BOT) drop object 3
+    case  3: turn90("LEFT");       numGride++; break;  /* (C4,MID) face north */
+    case  5: keep_item("RIGHT");   numGride++; break;  /* (C4,TOP) pick obj 3 */
+    case  7: turn90("RIGHT");      numGride++; break;  /* (C4,MID) face west  */
+    case 10: turn90("LEFT");       numGride++; break;  /* (C2,MID) face south */
+    case 12: place_item("RIGHT");  numGride++; break;  /* (C2,BOT) drop obj 3 */
 
     /* ---------- object 1: top of C1  ->  drop at x1, bottom of C4 ------- */
-    case 14: turn90("LEFT");       numGride++; break;  // (C2,MID) face west
-    case 16: turn90("RIGHT");      numGride++; break;  // (C1,MID) face north
-    case 18: keep_item("RIGHT");   numGride++; break;  // (C1,TOP) pick object 1
-    case 20: turn90("LEFT");       numGride++; break;  // (C1,MID) face east
-    case 24: turn90("RIGHT");      numGride++; break;  // (C4,MID) face south
-    case 26: place_item("RIGHT");  numGride++; break;  // (C4,BOT) drop object 1
+    case 14: turn90("LEFT");       numGride++; break;  /* (C2,MID) face west  */
+    case 16: turn90("RIGHT");      numGride++; break;  /* (C1,MID) face north */
+    case 18: keep_item("RIGHT");   numGride++; break;  /* (C1,TOP) pick obj 1 */
+    case 20: turn90("LEFT");       numGride++; break;  /* (C1,MID) face east  */
+    case 24: turn90("RIGHT");      numGride++; break;  /* (C4,MID) face south */
+    case 26: place_item("RIGHT");  numGride++; break;  /* (C4,BOT) drop obj 1 */
 
     /* ---------- object 2: bottom of C1  ->  drop at x2, bottom of C3 ---- */
-    case 28: turn90("LEFT");       numGride++; break;  // (C4,MID) face west
-    case 32: turn90("LEFT");       numGride++; break;  // (C1,MID) face south
-    case 34: keep_item("RIGHT");   numGride++; break;  // (C1,BOT) pick object 2
-    case 36: turn90("RIGHT");      numGride++; break;  // (C1,MID) face east
-    case 39: turn90("RIGHT");      numGride++; break;  // (C3,MID) face south
-    case 41: place_item("STOP");   numGride++; break;  // (C3,BOT) drop object 2
+    case 28: turn90("LEFT");       numGride++; break;  /* (C4,MID) face west  */
+    case 32: turn90("LEFT");       numGride++; break;  /* (C1,MID) face south */
+    case 34: keep_item("RIGHT");   numGride++; break;  /* (C1,BOT) pick obj 2 */
+    case 36: turn90("RIGHT");      numGride++; break;  /* (C1,MID) face east  */
+    case 39: turn90("RIGHT");      numGride++; break;  /* (C3,MID) face south */
+    case 41: place_item("STOP");   numGride++; break;  /* (C3,BOT) drop obj 2 */
 
     default: followLine();
   }
 }
 
-/* =====================================================================
- *  Helper wrappers (from slide robot10)
- * ===================================================================== */
+/* ================================================================= actions */
 
-// Turn 90 degrees at an intersection. direction = "RIGHT" or "LEFT".
+/* Turn 90 degrees ABOUT THE INTERSECTION, not about wherever the robot happened
+ * to stop. cmSinceJunction() is how far the robot has rolled since the bar
+ * crossed the line, so the remaining advance is 9.5 cm minus that. */
 void turn90(String direction) {
-  moveFor();
-  delay(NUDGE_TURN);
-  stopRobot();
-  if (direction == "RIGHT") { turnRight90(); }
-  else                      { turnLeft90();  }
-  stopRobot();
-  leaveGride();
-  clearPid();
+  float togo = SENSOR_AHEAD_CM - cmSinceJunction();
+  brake();
+  advanceCm(togo);
+  if (direction == "RIGHT") turnRight90(); else turnLeft90();
+  brake();
+  reanchor();
+  missionCheckpoint();
 }
 
-// Pick up the object at the end of a line, then turn 180 degrees to head back.
+/* Pick up the object sitting OBJECT_BEYOND_CM past the line, then turn around.
+ * The jaws are GRIP_REACH_CM ahead of the pivot and the bar SENSOR_AHEAD_CM,
+ * so from the moment of detection the pivot must advance
+ *     SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM
+ * for the jaws to close around the object. With 9.5 + 5.0 - 12.0 that is
+ * 2.5 cm; if your gripper reaches further than the bar sees, it goes negative
+ * and the robot correctly stops short. */
 void keep_item(String direction) {
-  moveFor();
-  delay(NUDGE_PICK);
-  stopRobot();
-  delay(500);
+  float want = SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM;
+  float togo = want - cmSinceJunction();
+  brake();
+  if (togo > 0) advanceCm(togo);
+  delay(150);
+
   keepup_object();
-  if (direction == "RIGHT") { turnRight180(); }
-  else                      { turnLeft180();  }
-  stopRobot();
-  leaveGride();
-  clearPid();
+
+  if (direction == "RIGHT") turnRight180(); else turnLeft180();
+  brake();
+  reanchor();
+  missionCheckpoint();
 }
 
-// Place the object at the end of a line.
-//   "RIGHT" / "LEFT" = place it, raise the arm, then turn 180 degrees
-//   "STOP"           = place it and stay put (used for the last drop)
+/* Place the object. "RIGHT"/"LEFT" turn around afterwards to carry on;
+ * "STOP" leaves the robot where it is, for the final drop. */
 void place_item(String direction) {
-  moveFor();
-  delay(NUDGE_PLACE);
-  stopRobot();
-  delay(500);
+  float want = SENSOR_AHEAD_CM + OBJECT_BEYOND_CM - GRIP_REACH_CM;
+  float togo = want - cmSinceJunction();
+  brake();
+  if (togo > 0) advanceCm(togo);
+  delay(150);
+
   put_object();
-  if (direction == "RIGHT") {
-    arm_over_head();  // raise the arm so it clears the object just placed
-    turnRight180();
-  } else if (direction == "LEFT") {
-    arm_over_head();  // raise the arm
-    turnLeft180();
+
+  if (direction == "STOP") {
+    reverseCm(4.0f);                 /* back off so the arm clears the object */
+    armTo(SERVO_ARM_HIGH);
+    brake();
+    missionCheckpoint();
+    return;
   }
-  stopRobot();
-  put_object();       // return the arm to its resting pose (down and open)
-  if (direction != "STOP") { leaveGride(); }
-  clearPid();
+
+  arm_over_head();                   /* lift clear before swinging round */
+  if (direction == "RIGHT") turnRight180(); else turnLeft180();
+  brake();
+  armTo(SERVO_ARM_DOWN);
+  gripTo(SERVO_GRIP_OPEN);
+  reanchor();
+  missionCheckpoint();
 }
 
-/* After a turn completes the robot can still be straddling the intersection
- * it just used. Left alone, countGrid() counts that same crossing twice, and
- * its internal while(checkGrid()) never exits because stopRobot() has already
- * braked the wheels, so the robot freezes in the middle of the field. Creep
- * forward slowly until the crossing is clear, then resume line following.
- */
-void leaveGride() {
-  unsigned long t0 = millis();
-  sp = 60;
-  while (checkGrid() && millis() - t0 < 800) { moveFor(); }
-  stopRobot();
+/* ============================================================== checkpoint */
+
+static void missionCheckpoint() {
+#if ENABLE_CRASH_RESUME
+  /* One 4-byte record, written only after an action completes -- about 18
+   * writes per run. EEPROM is rated for 100k writes per cell, so this is
+   * thousands of practice runs. */
+  uint16_t rec[2] = { (uint16_t)(EE_MAGIC & 0xFFFF), (uint16_t)(numGride + 1) };
+  EEPROM.put(EE_ADDR_CHECKPOINT, rec);
+#endif
+}
+
+static void clearCheckpoint() {
+  uint16_t rec[2] = { 0, 0 };
+  EEPROM.put(EE_ADDR_CHECKPOINT, rec);
+}
+
+/* =================================================================== start */
+
+/* Gives the student time to put the robot down and let go. Without a button
+ * fitted it falls through after a short wait, so nothing breaks. */
+static void waitForStart() {
+  Serial.println(F("ready -- press start (or wait 3 s)"));
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < 3000) {
+    digitalWrite(PIN_LED, ((millis() / 150) & 1));
+    if (digitalRead(PIN_START) == LOW) {
+      while (digitalRead(PIN_START) == LOW) { }   /* wait for release */
+      break;
+    }
+  }
+  digitalWrite(PIN_LED, 0);
+  clearCheckpoint();
+  Serial.println(F("GO"));
+}
+
+/* ============================================================= calibration */
+
+/* Measures, in order:
+ *   1. per-channel background and tape levels, by sweeping across a line
+ *   2. the dead band, by ramping the duty until the robot actually moves
+ *   3. forward speed at DUTY_CAL, by driving straight for 3 s
+ *   4. the time for a 90 degree pivot
+ * and stores the result in EEPROM. Everything is reported over serial so a
+ * student can check the numbers look sane before trusting them. */
+static void runCalibration() {
+  Serial.println(F("=== CALIBRATION ==="));
+  calDefaults();
+  g_calValid = false;
+
+  Serial.println(F("1. sensors: sweeping across the line"));
+  uint16_t lo[8], hi[8];
+  for (uint8_t i = 0; i < 8; i++) { lo[i] = 1023; hi[i] = 0; }
+  digitalWrite(STBY, 1);
+  for (uint8_t pass = 0; pass < 4; pass++) {
+    spin(pass & 1 ? -1 : 1, DUTY_PIVOT - 20);
+    uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < 700) {
+      for (uint8_t i = 0; i < 8; i++) {
+        uint16_t v = analogRead(SENSOR_PIN[i]);
+        if (v < lo[i]) lo[i] = v;
+        if (v > hi[i]) hi[i] = v;
+      }
+    }
+  }
+  brake();
+  for (uint8_t i = 0; i < 8; i++) {
+    g_cal.lo[i] = lo[i];
+    g_cal.hi[i] = hi[i];
+    Serial.print(F("  ch")); Serial.print(i);
+    Serial.print(F(" lo=")); Serial.print(lo[i]);
+    Serial.print(F(" hi=")); Serial.print(hi[i]);
+    if (hi[i] - lo[i] < 120) Serial.print(F("  <-- WEAK, check this sensor"));
+    Serial.println();
+  }
+
+  Serial.println(F("2. speed at DUTY_CAL for 3 s -- measure the distance"));
+  delay(1500);
+  driveStraight(DUTY_CAL);
+  delay(3000);
+  brake();
+  Serial.println(F("   enter cm/3 into CM_PER_S_AT_CAL in config.h"));
+
+  Serial.println(F("3. pivot: 4 full turns, time them"));
+  delay(1500);
+  uint32_t p0 = millis();
+  spin(1, DUTY_PIVOT);
+  delay((uint32_t)MS_PER_90DEG * 16ul);
+  brake();
+  Serial.print(F("   commanded ")); Serial.print((int)(millis() - p0));
+  Serial.println(F(" ms for 1440 deg; adjust MS_PER_90DEG by the error"));
+
+  calSave();
+  Serial.println(F("=== saved to EEPROM -- power-cycle to run ==="));
+  while (1) { digitalWrite(PIN_LED, ((millis() / 400) & 1)); }
 }

@@ -1,0 +1,10 @@
+# Claude Code agent worktrees and local state
+.claude/
+
+# Simulator build output
+sim/sim
+sim/sim.exe
+*.o
+
+# Downloaded archives
+*.zip
