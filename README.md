@@ -131,7 +131,8 @@ Everything lives in `config.h`. The ones that matter most, in order:
 
 | Constant | Meaning |
 |---|---|
-| `CM_PER_S_AT_CAL` | Forward speed at `DUTY_CAL`. **Every distance depends on this.** |
+| `LINE_WIDTH_CM` | Tape width. **The robot's only ruler.** It corrects its own odometry against this while it drives, so if this is wrong, the correction is wrong too. Lay a ruler across a line. |
+| `CM_PER_S_AT_CAL` | Forward speed at `DUTY_CAL`. Sets every distance, but the robot now repairs errors in it from `LINE_WIDTH_CM`, so it no longer has to be perfect. |
 | `MS_PER_90DEG` | Pivot time for 90°. Sets how accurate turns are. |
 | `SENSOR_AHEAD_CM` | 9.5 - re-measure if you move the bar. |
 | `GRIP_REACH_CM` | Axle to jaws. Wrong by 1 cm and pick-ups start missing. |
