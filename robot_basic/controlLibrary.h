@@ -35,8 +35,10 @@ String detectLine = "00000000";
 int sp = 50;
 
 /* YOURS, not the slides'. robot06 page 11 uses 255. Lower it if the robot is
- * too fast to count crossings reliably or overshoots its turns. */
-int maxSp = 150;
+ * too fast to count crossings reliably or overshoots its turns.
+ * Note sp starts at 50 and climbs by 2 every 10 ms, so it reaches maxSp in
+ * well under a second -- this really is the walking speed, not just a ceiling. */
+int maxSp = 100;
 
 unsigned long tUpSp = 0;
 
@@ -49,6 +51,27 @@ unsigned long tUpSp = 0;
 #define ARM_DOWN      103
 #define ARM_CARRY      70
 #define ARM_HIGH       50
+
+/* ---- reading the line ----------------------------------------------------
+ * The slides hard-code `analogRead(sensorPin[i]) >= 500` in getSensor(). 500 is
+ * a guess about where YOUR bar sits, and if it guesses wrong the robot reads no
+ * line at all however good the sensors are.
+ *
+ * Set LINE_THRESHOLD to halfway between what a channel reads over the white mat
+ * and what it reads over the tape. Use robot_test.ino option 1 to get those two
+ * numbers -- it prints every channel live and tracks the swing.
+ *
+ * SENSOR_ACTIVE_LOW matters just as much. Some bars output a HIGH voltage over
+ * white and a LOW one over black; others are the other way round. The slides
+ * assume black reads HIGH. If your raw numbers go DOWN when you slide a sensor
+ * onto the tape, set this to 1 -- otherwise every pattern is inverted and
+ * nothing works no matter what threshold you pick. */
+#define LINE_THRESHOLD     500
+#define SENSOR_ACTIVE_LOW    0
+
+/* Set to 1 to print the sensor pattern while it drives, so you can watch what
+ * it is actually seeing. Slows the loop down; turn it off for a real run. */
+#define SHOW_SENSORS         0
 
 void beginFnc();
 String getSensor();
@@ -85,7 +108,13 @@ void beginFnc(){
 String getSensor(){
   String x = "";
   for(int i=0;i<8;i++){
-    if(analogRead(sensorPin[i]) >= 500){
+    int v = analogRead(sensorPin[i]);
+#if SENSOR_ACTIVE_LOW
+    bool onLine = (v <= LINE_THRESHOLD);
+#else
+    bool onLine = (v >= LINE_THRESHOLD);
+#endif
+    if(onLine){
       x += "1";
     }else{
       x += "0";
@@ -93,6 +122,20 @@ String getSensor(){
   }
   return(x);
 }
+
+#if SHOW_SENSORS
+/* Prints the pattern and the raw values, no more than 5 times a second so it
+ * does not swamp the control loop. */
+unsigned long tShow = 0;
+void showSensors(){
+  if(millis() - tShow < 200) return;
+  tShow = millis();
+  Serial.print(getSensor());
+  Serial.print("  ");
+  for(int i=0;i<8;i++){ Serial.print(analogRead(sensorPin[i])); Serial.print(' '); }
+  Serial.println();
+}
+#endif
 
 int getErrorInput(String L){
   int e;
@@ -116,6 +159,9 @@ int getErrorInput(String L){
 }
 
 void followLine(){
+#if SHOW_SENSORS
+  showSensors();
+#endif
   detectLine = getSensor();
   int errorInput = getErrorInput(detectLine);
   if(errorInput != 100){

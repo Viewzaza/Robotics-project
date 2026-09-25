@@ -13,13 +13,46 @@ it is this one.
 Six slide decks were transcribed independently and cross-checked against this.
 What follows is what that turned up.
 
+## If it cannot read the line
+
+The slides hard-code the threshold: `analogRead(sensorPin[i]) >= 500`. 500 is a
+guess about where your particular bar sits. If it guesses wrong, the robot reads
+no line at all no matter how good the sensors are. Three knobs at the top of
+`controlLibrary.h` cover it.
+
+**First, get the numbers.** Upload `robot_test/robot_test.ino`, Serial Monitor at
+115200, press `1`, and slide the robot on and off a line. It prints every channel
+live and tracks the swing each one has seen.
+
+**Then check the polarity.** Watch one channel as you slide it onto the tape.
+
+- reading goes UP over the tape -> leave `SENSOR_ACTIVE_LOW 0`
+- reading goes DOWN over the tape -> set `SENSOR_ACTIVE_LOW 1`
+
+If this is backwards, every pattern is inverted and no threshold will help. It is
+the first thing to rule out.
+
+**Then set the threshold.** `LINE_THRESHOLD` goes halfway between the white-mat
+reading and the tape reading. If a channel reads 180 over the mat and 640 over
+the tape, use 410 - not 500.
+
+**Then watch it work.** Set `SHOW_SENSORS 1` and it prints the pattern and the
+raw values while it drives, so you can see what it is actually seeing. Turn it
+back off for a real run; it slows the loop down.
+
+If the gap between mat and tape is under about 150 counts, the problem is
+physical and no threshold fixes it: bar height (aim 5-10 mm off the surface), a
+dirty or dead sensor, a glossy surface, or the bar's own trimpot.
+
 ## Two things here are yours, not the slides'
 
 **Servo angles.** The slides use 140/65/149 and 105/90/40. This uses the ones
 you measured: grip closed 75, arm down 103, carry 70, high 50.
 
-**`maxSp`.** The slides use 255. This uses 150, because you asked for a slower
-walk. Change the one line at the top of `controlLibrary.h` to go back.
+**`maxSp`.** The slides use 255. This uses 100, because it was still running too
+fast. Note that `sp` starts at 50 and climbs by 2 every 10 ms, so it reaches
+`maxSp` in well under a second - this is the walking speed, not just a ceiling.
+Change the one line at the top of `controlLibrary.h` to go back.
 
 Everything else is the slides.
 
