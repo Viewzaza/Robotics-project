@@ -22,6 +22,14 @@
  *  firmware's config.h. Both work; the flag is easier.
  *
  *  Put the robot on a book so the wheels spin free.
+ *
+ *  IF ONE WHEEL TURNS FURTHER THAN THE OTHER
+ *      Check it mechanically first -- spin both wheels by hand with the power
+ *      off. If one feels stiffer, that is friction, and no amount of trim fixes
+ *      a wheel that is rubbing or a gearbox that is binding.
+ *      If they feel the same, set TRIM_RIGHT_PCT below until the STRAIGHT test
+ *      keeps a straight line, then copy that number into TRIM_R_PCT in
+ *      robot_countGride/config.h.
  * ===================================================================== */
 
 /* ---- TB6612FNG, same pins as the mission firmware -------------------- */
@@ -37,6 +45,12 @@
 #define RUN_MS    2000   /* how long each step runs  */
 #define PAUSE_MS   800   /* stopped between steps    */
 
+/* Right-motor trim, percent. 100 = untouched. If one wheel turns further than
+ * the other in the same time, scale the faster one down until they match, then
+ * copy the value into TRIM_R_PCT in the mission firmware's config.h.
+ *   right turns 360 while left turns 270  ->  270/360 = 75  ->  set 75 */
+#define TRIM_RIGHT_PCT  100
+
 /* duty > 0 forward, < 0 reverse, 0 brake */
 void leftMotor(int duty) {
   digitalWrite(AIN1, duty >= 0);
@@ -45,9 +59,12 @@ void leftMotor(int duty) {
 }
 
 void rightMotor(int duty) {
-  digitalWrite(BIN1, duty >= 0);
-  digitalWrite(BIN2, duty <= 0);
-  analogWrite(PWMB, duty < 0 ? -duty : duty);
+  long d = (long)duty * TRIM_RIGHT_PCT / 100;
+  if (d > 255) d = 255;
+  if (d < -255) d = -255;
+  digitalWrite(BIN1, d >= 0);
+  digitalWrite(BIN2, d <= 0);
+  analogWrite(PWMB, (int)(d < 0 ? -d : d));
 }
 
 void stopBoth() {
@@ -71,6 +88,21 @@ void setup() {
   pinMode(STBY, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
 
+  /* Put both motors on the SAME PWM frequency before comparing them.
+   *
+   * Arduino's defaults do not: D6 (left) is on Timer0 at ~976 Hz, D3 (right) is
+   * on Timer2 at ~490 Hz. A brushed motor does not respond identically to two
+   * different switching frequencies, so with stock analogWrite the two wheels
+   * can turn at visibly different speeds for the same duty even when the motors
+   * and the wiring are fine. Timer2 prescaler /32 puts D3 on ~980 Hz to match.
+   *
+   * The mission firmware does the same thing, so trim measured here is the trim
+   * that firmware needs. Timer0 is left alone -- millis() and delay() live on
+   * it and changing its prescaler would break their timing. */
+#if defined(__AVR__)
+  TCCR2B = (uint8_t)((TCCR2B & 0xF8) | 0x03);
+#endif
+
   digitalWrite(STBY, LOW);          /* stay off while everything settles */
   stopBoth();
   delay(1000);
@@ -91,6 +123,17 @@ void loop() {
   step(F("BOTH forward  -- robot would drive straight"),  SPEED,  SPEED);
   step(F("BOTH reverse"),                                -SPEED, -SPEED);
   step(F("SPIN right    -- left forward, right back"),    SPEED, -SPEED);
+
+  /* Long straight run: the one that actually shows a speed mismatch. Count how
+   * far each wheel turns, or put it on the floor and see whether it curves. */
+  Serial.println(F("STRAIGHT 5 s -- count the turns of each wheel"));
+  leftMotor(SPEED);
+  rightMotor(SPEED);
+  delay(5000);
+  stopBoth();
+  Serial.print(F("  trim now "));
+  Serial.print(TRIM_RIGHT_PCT);
+  Serial.println(F("% -- if the right still turns further, lower it"));
 
   digitalWrite(LED_BUILTIN, LOW);
   Serial.println(F("--- repeating in 2 s ---"));
