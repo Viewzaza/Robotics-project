@@ -69,10 +69,37 @@ unsigned long tUpSp = 0;
 #define LINE_THRESHOLD     500
 #define SENSOR_ACTIVE_LOW    0
 
+/* ---- AUTOMATIC -----------------------------------------------------------
+ * With this on, the two settings above are only fallbacks. At switch-on the
+ * robot works them out for itself: it rocks left and right a few times so the
+ * bar sweeps across the line, watches what every channel does, and sets a
+ * threshold per channel from what it actually saw.
+ *
+ * It works out the polarity on its own too. The line is thin and the mat is
+ * wide, so during the sweep each sensor spends most of its time over the mat.
+ * Whichever side of the middle a channel sits on MOST of the time is therefore
+ * the mat, and the line is the other side. No need to know whether your bar
+ * reads high or low over black.
+ *
+ * The rocking is symmetric -- equal time each way -- so the robot ends up
+ * pointing where it started, and it then squares itself back up on the line
+ * before the mission begins.
+ *
+ * Set to 0 to go back to the fixed numbers above. */
+#define AUTO_CALIBRATE       1
+#define CAL_DUTY            70   /* how hard it rocks; slow is fine        */
+#define CAL_MS             500   /* per quarter of the rocking sequence    */
+#define CAL_MIN_SWING      120   /* below this a channel is called useless */
+
 /* Set to 1 to print the sensor pattern while it drives, so you can watch what
  * it is actually seeing. Slows the loop down; turn it off for a real run. */
 #define SHOW_SENSORS         0
 
+int  senseThr[8];                /* per-channel threshold, filled at startup */
+bool senseActiveLow = SENSOR_ACTIVE_LOW;
+bool senseCalibrated = false;
+
+void autoCalibrate();
 void beginFnc();
 String getSensor();
 int getErrorInput(String L);
@@ -90,6 +117,99 @@ void keepup_object();
 void put_object();
 void arm_over_head(); //ยกแขนสูง
 
+/* Rock the robot on the spot so the sensor bar sweeps across the line. */
+void calSpin(int dir,int duty){
+  if(dir > 0){
+    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,duty);
+    digitalWrite(F_R,0); digitalWrite(B_R,1); analogWrite(sp_R,duty);
+  }else{
+    digitalWrite(F_L,0); digitalWrite(B_L,1); analogWrite(sp_L,duty);
+    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,duty);
+  }
+}
+
+void autoCalibrate(){
+  int lo[8], hi[8];
+  unsigned long sum[8];
+  unsigned long n = 0;
+  for(int i=0;i<8;i++){ lo[i]=1023; hi[i]=0; sum[i]=0; }
+
+  /* Left, right, right, left: equal time each way, so the robot finishes
+   * pointing where it started. Four passes means the bar crosses the line
+   * several times even if it began sitting squarely on it. */
+  int seq[4] = {-1, 1, 1, -1};
+  for(int k=0;k<4;k++){
+    calSpin(seq[k], CAL_DUTY);
+    unsigned long t0 = millis();
+    while(millis() - t0 < CAL_MS){
+      for(int i=0;i<8;i++){
+        int v = analogRead(sensorPin[i]);
+        if(v < lo[i]) lo[i] = v;
+        if(v > hi[i]) hi[i] = v;
+        sum[i] += (unsigned long)v;
+      }
+      n++;
+    }
+  }
+  stopRobot();
+
+  /* Threshold halfway between the two surfaces this channel actually saw. */
+  int usable = 0;
+  for(int i=0;i<8;i++){
+    senseThr[i] = (lo[i] + hi[i]) / 2;
+    if(hi[i] - lo[i] >= CAL_MIN_SWING) usable++;
+  }
+
+  /* Polarity. The tape is thin and the mat is wide, so each sensor spent most
+   * of the sweep over the mat -- which means the AVERAGE reading sits on the
+   * mat's side of the middle. If the average is above the middle, the mat is
+   * the bright side and the line is the dark one, so the line is ACTIVE LOW.
+   * Every channel votes; the majority wins. */
+  int votesLow = 0;
+  for(int i=0;i<8;i++){
+    if(hi[i] - lo[i] < CAL_MIN_SWING) continue;     /* a flat channel gets no vote */
+    unsigned long mean = n ? (sum[i] / n) : 0;
+    if((int)mean > senseThr[i]) votesLow++;
+  }
+  senseActiveLow = (votesLow * 2 > usable);
+  senseCalibrated = (usable >= 3);
+
+  Serial.println();
+  Serial.println(F("--- auto calibration ---"));
+  for(int i=0;i<8;i++){
+    Serial.print(F("  A")); Serial.print(i);
+    Serial.print(F("  low ")); Serial.print(lo[i]);
+    Serial.print(F("  high ")); Serial.print(hi[i]);
+    Serial.print(F("  swing ")); Serial.print(hi[i]-lo[i]);
+    Serial.print(F("  threshold ")); Serial.print(senseThr[i]);
+    if(hi[i]-lo[i] < CAL_MIN_SWING) Serial.print(F("   <-- too flat to use"));
+    Serial.println();
+  }
+  Serial.print(F("  line reads ")); Serial.println(senseActiveLow ? F("DARKER than the mat") : F("BRIGHTER than the mat"));
+  Serial.print(F("  usable channels: ")); Serial.println(usable);
+  if(!senseCalibrated){
+    Serial.println(F("  NOT ENOUGH CONTRAST -- falling back to the fixed threshold."));
+    Serial.println(F("  Start the robot ON a line, and check the bar is 5-10 mm off the surface."));
+  }
+  Serial.println(F("------------------------"));
+}
+
+/* Square up on the line after calibrating, so the mission starts straight. */
+void centreOnLine(){
+  unsigned long t0 = millis();
+  while(millis() - t0 < 2500){
+    String ch = getSensor();
+    if(ch.charAt(3) == '1' || ch.charAt(4) == '1') break;   /* middle sensors */
+    /* turn toward whichever side can see it */
+    int seen = -1;
+    for(int i=0;i<8;i++){ if(ch.charAt(i) == '1'){ seen = i; break; } }
+    if(seen < 0){ calSpin(1, CAL_DUTY); }                   /* nothing: just look */
+    else if(seen < 3){ calSpin(-1, CAL_DUTY); }             /* line is to the left */
+    else { calSpin(1, CAL_DUTY); }
+  }
+  stopRobot();
+}
+
 void beginFnc(){
   pinMode(sp_L,OUTPUT); pinMode(F_L,OUTPUT); pinMode(B_L,OUTPUT);
   pinMode(sp_R,OUTPUT); pinMode(F_R,OUTPUT); pinMode(B_R,OUTPUT);
@@ -102,18 +222,23 @@ void beginFnc(){
   servo_y.write(ARM_DOWN);//ยกแขนลง
 
   digitalWrite(STBY,1);
+
+#if AUTO_CALIBRATE
+  autoCalibrate();
+  centreOnLine();
+  delay(300);
+#endif
+
   clearPid();
+  tUpSp = millis();
 }
 
 String getSensor(){
   String x = "";
   for(int i=0;i<8;i++){
     int v = analogRead(sensorPin[i]);
-#if SENSOR_ACTIVE_LOW
-    bool onLine = (v <= LINE_THRESHOLD);
-#else
-    bool onLine = (v >= LINE_THRESHOLD);
-#endif
+    int thr = senseCalibrated ? senseThr[i] : LINE_THRESHOLD;
+    bool onLine = senseActiveLow ? (v <= thr) : (v >= thr);
     if(onLine){
       x += "1";
     }else{

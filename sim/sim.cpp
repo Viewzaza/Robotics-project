@@ -228,6 +228,7 @@ int main(int argc, char** argv) {
   double maxSimSec = 240.0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--quiet")) w_verbose = false;
+    else if (!strcmp(argv[i], "--serial")) Serial.echo = true;  /* show what the firmware prints */
     else if (!strncmp(argv[i], "--trim=", 7)) CFG.trimR = atof(argv[i] + 7);
     else if (!strncmp(argv[i], "--vmax=", 7)) CFG.vMax = atof(argv[i] + 7);
     else if (!strncmp(argv[i], "--cell=", 7)) CFG.cell = atof(argv[i] + 7);

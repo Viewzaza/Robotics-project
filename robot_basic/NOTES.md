@@ -13,36 +13,47 @@ it is this one.
 Six slide decks were transcribed independently and cross-checked against this.
 What follows is what that turned up.
 
-## If it cannot read the line
+## Reading the line: it does this by itself now
 
-The slides hard-code the threshold: `analogRead(sensorPin[i]) >= 500`. 500 is a
-guess about where your particular bar sits. If it guesses wrong, the robot reads
-no line at all no matter how good the sensors are. Three knobs at the top of
-`controlLibrary.h` cover it.
+`AUTO_CALIBRATE` is on. Nothing to press, nothing to measure, nothing to type.
 
-**First, get the numbers.** Upload `robot_test/robot_test.ino`, Serial Monitor at
-115200, press `1`, and slide the robot on and off a line. It prints every channel
-live and tracks the swing each one has seen.
+Put the robot on the line and switch it on. It rocks left, right, right, left -
+equal time each way - so the sensor bar sweeps across the line several times
+while it watches every channel. From that it sets a threshold per channel from
+what that channel actually saw, rather than assuming the slides' fixed 500.
 
-**Then check the polarity.** Watch one channel as you slide it onto the tape.
+It works out the polarity on its own too, which is the part that is easy to get
+wrong by hand. The tape is thin and the mat is wide, so each sensor spends most
+of the sweep looking at the mat. Whichever side of the middle a channel sits on
+MOST of the time is therefore the mat, and the line is the other side. So it
+does not matter whether your bar reads high or low over black - it finds out.
 
-- reading goes UP over the tape -> leave `SENSOR_ACTIVE_LOW 0`
-- reading goes DOWN over the tape -> set `SENSOR_ACTIVE_LOW 1`
+The rocking is symmetric, so the robot finishes pointing where it started, and
+it then squares itself back up on the line before the mission begins.
 
-If this is backwards, every pattern is inverted and no threshold will help. It is
-the first thing to rule out.
+It prints what it decided, at 9600 baud:
 
-**Then set the threshold.** `LINE_THRESHOLD` goes halfway between the white-mat
-reading and the tape reading. If a channel reads 180 over the mat and 640 over
-the tape, use 410 - not 500.
+```
+--- auto calibration ---
+  A0  low 100  high 900  swing 800  threshold 500
+  ...
+  line reads BRIGHTER than the mat
+  usable channels: 8
+------------------------
+```
 
-**Then watch it work.** Set `SHOW_SENSORS 1` and it prints the pattern and the
-raw values while it drives, so you can see what it is actually seeing. Turn it
-back off for a real run; it slows the loop down.
+**Read the swing column.** That is the real health check. Under 120 counts and a
+channel is flagged too flat to use, and no threshold can rescue it - that is
+physical: bar height (aim 5-10 mm off the surface), a dirty or dead sensor, a
+glossy surface, or the bar's own trimpot. If fewer than 3 channels are usable it
+says so and falls back to the fixed threshold.
 
-If the gap between mat and tape is under about 150 counts, the problem is
-physical and no threshold fixes it: bar height (aim 5-10 mm off the surface), a
-dirty or dead sensor, a glossy surface, or the bar's own trimpot.
+**If it says NOT ENOUGH CONTRAST**, the most likely reason is that the robot was
+not on a line when you switched it on, so the sweep never crossed one.
+
+Turning it off: set `AUTO_CALIBRATE 0` and it uses `LINE_THRESHOLD` and
+`SENSOR_ACTIVE_LOW` exactly as the slides do. `SHOW_SENSORS 1` prints the live
+pattern while driving if you want to watch.
 
 ## Two things here are yours, not the slides'
 
