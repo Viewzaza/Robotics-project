@@ -153,6 +153,35 @@ void setup() {
     Serial.println(F("WARNING: no EEPROM calibration, using compiled defaults"));
   }
 
+#if DIAG_SENSORS
+  /* Sensor meter. The robot never moves in this mode. */
+  Serial.println(F("=== SENSOR DIAGNOSTIC -- the robot will not drive ==="));
+  Serial.println(F("slide it on and off a line; want >150 counts of swing per channel"));
+  brake();
+  digitalWrite(STBY, 0);                 /* motors off for good */
+  for (;;) {
+    uint8_t m = readMask();
+    Serial.print(F("raw"));
+    for (uint8_t i = 0; i < 8; i++) {
+      Serial.print(' ');
+      uint16_t v = adcRead(i);
+      if (v < 100) Serial.print(' ');
+      if (v < 10)  Serial.print(' ');
+      Serial.print((int)v);
+    }
+    Serial.print(F("  thr"));
+    for (uint8_t i = 0; i < 8; i++) { Serial.print(' '); Serial.print((int)threshOf(i)); }
+    Serial.print(F("  mask "));
+    Serial.print(maskToString(m));
+    Serial.print(F("  bits "));
+    Serial.print((int)bitCount(m));
+    if (bitCount(m) >= JUNCTION_MIN_BITS) Serial.print(F(" <JUNCTION>"));
+    Serial.println();
+    digitalWrite(PIN_LED, m ? 1 : 0);    /* LED on whenever any sensor sees line */
+    delay(200);
+  }
+#endif
+
 #if ENABLE_CRASH_RESUME
   /* Recover the mission step if an earlier run was cut short by a brown-out.
    * A servo stalling on a gripped object can dip the shared 5 V rail far enough

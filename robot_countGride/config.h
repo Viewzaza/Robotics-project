@@ -100,14 +100,14 @@
 /* ADC prescaler. Arduino leaves this at 128 (0x07) = 125 kHz ADC clock and
  * ~104 us per conversion, so reading the eight channels costs 832 us and that
  * alone sets the control-loop period.
- *   0x04 = /16  -> 1   MHz, ~13 us  (default here; ~8x faster)
- *   0x05 = /32  -> 500 kHz, ~26 us  (use this if readings look noisy)
+ *   0x04 = /16  -> 1   MHz, ~13 us  (fastest, least settling time)
+ *   0x05 = /32  -> 500 kHz, ~26 us  (default here)
  *   0x06 = /64  -> 250 kHz, ~52 us
  * The datasheet quotes full 10-bit accuracy only to 200 kHz, which costs a
  * couple of LSB here. Irrelevant for a threshold decision with ~700 counts of
  * black/white contrast, but bump to 0x05 if your bar has a high output
  * impedance and the mask looks unstable. */
-#define ADC_PRESCALER   0x04
+#define ADC_PRESCALER   0x05
 
 /* --------------------------------------------------------------- sensing -- */
 /* Fallback threshold when no EEPROM calibration is present. Values above this
@@ -161,6 +161,22 @@
  * then travel this far before another junction can be counted. */
 #define JUNCTION_DEBOUNCE_MS   12
 #define JUNCTION_REARM_CM      8.0f
+
+/* ---------------------------------------------------------- diagnostics --- */
+/* Set to 1 and re-upload to turn the robot into a sensor meter: it never
+ * drives, it just streams every channel's raw reading, its threshold, and the
+ * resulting mask, several times a second. Slide the robot on and off a line and
+ * watch the numbers.
+ *
+ * What you are looking for, per channel:
+ *   - over the WHITE mat, a low number, and over the TAPE a high one
+ *   - a gap between those two of at least ~150 counts, ideally 400+
+ *   - all eight channels roughly agreeing with each other
+ * If the gap is small, the bar is too high or too low off the surface (aim for
+ * 5-10 mm), the surface is not matte enough, or the bar's own trimpot needs
+ * adjusting. No threshold setting can rescue a channel that barely moves.
+ * Set back to 0 before running the mission. */
+#define DIAG_SENSORS        0
 
 /* -------------------------------------------------------------- servos ---- */
 #define SERVO_GRIP_OPEN    140

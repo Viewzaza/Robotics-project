@@ -77,9 +77,29 @@ static const char *g_fault = 0;             /* set on any timeout */
     TCCR2B = (uint8_t)((TCCR2B & 0xF8) | 0x03);
   }
 
+  /* Read one channel, throwing the first conversion away.
+   *
+   * This matters more than the prescaler does. After ADMUX switches channel the
+   * ADC's sample-and-hold capacitor has to charge through the source, and it
+   * only gets the first 1.5 ADC clocks of the conversion to do it. At a 1 MHz
+   * ADC clock that is 1.5 us. A reflectance bar's phototransistor output is a
+   * high-impedance node -- the datasheet wants under 10 kohm and these bars are
+   * often well above it -- so the cap does NOT finish charging, and the
+   * conversion returns a value pulled toward the previous channel's reading.
+   *
+   * The symptom is that the line reads less black than it is: exactly "the
+   * sensor is not sensitive enough". Stock analogRead() never shows it because
+   * at the default 125 kHz prescaler the sampling window is ~8 us.
+   *
+   * Converting twice and keeping the second gives the cap a full conversion to
+   * settle. It costs one extra conversion per channel and is still faster than
+   * stock. */
   static inline uint16_t adcRead(uint8_t ch) {
     ADMUX = (uint8_t)((1 << REFS0) | (ch & 0x0F));
-    ADCSRA |= (uint8_t)(1 << ADSC);
+    ADCSRA |= (uint8_t)(1 << ADSC);          /* throwaway: lets the S/H settle */
+    while (ADCSRA & (1 << ADSC)) { }
+    (void)ADC;
+    ADCSRA |= (uint8_t)(1 << ADSC);          /* the one we keep */
     while (ADCSRA & (1 << ADSC)) { }
     return ADC;
   }
@@ -144,8 +164,25 @@ static void calSave() {
 static inline uint16_t threshOf(uint8_t i) {
   if (!g_calValid) return THRESH_FALLBACK;
   uint16_t lo = g_cal.lo[i], hi = g_cal.hi[i];
-  if (hi <= lo + 60) return THRESH_FALLBACK;   /* channel looks dead */
+  if (hi <= lo) return THRESH_FALLBACK;        /* nothing was ever measured */
+  /* Always use the midpoint of what this channel actually saw, however small
+   * the contrast. Falling back to a fixed 500 on a low-contrast channel was a
+   * trap: a sensor swinging 300..350 has its threshold put at 500, which is
+   * outside its entire range, so it reads "no line" forever and does so
+   * silently. A narrow band centred in the real range at least tracks the line.
+   * Poor contrast is reported by calibration as WEAK; it is the student's cue
+   * to lower the bar or clean it, not a reason to ignore the channel. */
   return (uint16_t)((lo + hi) / 2);
+}
+
+/* Hysteresis has to fit inside the contrast this channel actually has, or a
+ * weak channel can never cross both edges and latches. Never let it exceed a
+ * quarter of the measured swing. */
+static inline uint16_t hystOf(uint8_t i) {
+  if (!g_calValid) return THRESH_HYST;
+  uint16_t span = (g_cal.hi[i] > g_cal.lo[i]) ? (uint16_t)(g_cal.hi[i] - g_cal.lo[i]) : 0;
+  uint16_t q = (uint16_t)(span / 4);
+  return (q < THRESH_HYST) ? q : (uint16_t)THRESH_HYST;
 }
 
 /* ==================================================================== speed */
@@ -281,9 +318,10 @@ static uint8_t readMask() {
   for (uint8_t i = 0; i < 8; i++) {
     uint16_t v = adcRead(i);
     uint16_t t = threshOf(i);
+    uint16_t h = hystOf(i);
     bool was = (g_mask >> (7 - i)) & 1;
-    bool on  = was ? (v > (uint16_t)(t - THRESH_HYST))    /* hysteresis: */
-                   : (v > (uint16_t)(t + THRESH_HYST));   /* no chatter  */
+    bool on  = was ? (v > (uint16_t)(t - h))    /* hysteresis, scaled to   */
+                   : (v > (uint16_t)(t + h));   /* this channel's contrast */
     if (on) {
       m |= (uint8_t)(1 << (7 - i));
       num += ((int)i - 3) * 2 + 1;   /* -7,-5,-3,-1,+1,+3,+5,+7 */
