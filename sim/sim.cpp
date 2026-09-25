@@ -216,7 +216,12 @@ void sim_servo_write(int pin, int angle) {
 }
 
 // ----------------------------- firmware under test --------------------------
-#include "../robot_countGride/robot_countGride.ino"
+/* Which sketch is under test. Override to compare them:
+ *   g++ -O2 -std=c++14 -I sim -DFIRMWARE_INO='"../robot_basic/robot_basic.ino"'  *       -o sim/sim_basic.exe sim/sim.cpp */
+#ifndef FIRMWARE_INO
+#define FIRMWARE_INO "../robot_countGride/robot_countGride.ino"
+#endif
+#include FIRMWARE_INO
 
 // ----------------------------- runner ---------------------------------------
 int main(int argc, char** argv) {

@@ -14,9 +14,15 @@ The original firmware completed 0 of 315.**
 | `robot_countGride/hal.h` | Sensing, odometry, motion primitives, AVR fast paths |
 | `robot_countGride/controlLibrary.h` | The API the slides use, rebuilt on `hal.h` |
 | `robot_countGride/pidLibrary.h` | Course PID helper, with three guards added |
+| `robot_basic/` | **The course code as taught**, slides 6-11 transcribed, with the e33 route |
 | `robot_motor_test/robot_motor_test.ino` | Upload-and-watch motor check, no serial input needed |
 | `robot_test/robot_test.ino` | Standalone bench test rig: sensors, motors, servos, calibration |
 | `sim/` | Host-side simulator - field, kinematics, sensor bar, gripper |
+
+There are two working sketches. `robot_basic/` is the course code from the
+slides, transcribed and not improved - that is the one that matches what the
+teacher showed. `robot_countGride/` is the reworked version this README mostly
+describes. See `robot_basic/NOTES.md` for what differs and why.
 
 Open `robot_countGride/robot_countGride.ino` in the Arduino IDE.
 Board: **Arduino Nano** (a DIP Uno has no physical A6/A7, so two sensors would
