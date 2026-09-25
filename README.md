@@ -14,6 +14,7 @@ The original firmware completed 0 of 315.**
 | `robot_countGride/hal.h` | Sensing, odometry, motion primitives, AVR fast paths |
 | `robot_countGride/controlLibrary.h` | The API the slides use, rebuilt on `hal.h` |
 | `robot_countGride/pidLibrary.h` | Course PID helper, with three guards added |
+| `robot_test/robot_test.ino` | Standalone bench test rig: sensors, motors, servos, calibration |
 | `sim/` | Host-side simulator - field, kinematics, sensor bar, gripper |
 
 Open `robot_countGride/robot_countGride.ino` in the Arduino IDE.
@@ -141,29 +142,37 @@ Everything lives in `config.h`. The ones that matter most, in order:
 | `DUTY_CRUISE` | Walking pace. Lower is more reliable; raise it once counting holds. |
 | `ADC_PRESCALER` | Lower it (0x06) if the sensor mask still looks unstable. |
 
-### Wiring the motors
+### The bench test rig
 
-There is no correct order for AO1/AO2 or BO1/BO2 - they are two plain wires, and
-which way round they go just decides which way that wheel turns. Wire left to
-AO1/AO2 and right to BO1/BO2 either way round, then:
+Upload `robot_test/robot_test.ino` instead of the mission sketch. It shares no
+code with the firmware on purpose - it has to work when the firmware does not.
+Open the Serial Monitor at **115200** with line ending set to **Newline**, then
+type a number. Nothing moves until you ask.
 
-1. Set `DIAG_MOTORS 1` in `config.h`, upload, put the robot on a book so the
-   wheels spin free.
-2. It runs left forward, left back, right forward, right back, announcing each
-   over serial.
-3. Set `INVERT_LEFT` or `INVERT_RIGHT` to 1 for whichever wheel ran backwards,
-   and `DIAG_MOTORS` back to 0.
+| | test | gives you |
+|---|---|---|
+| `1` | sensors | live raw values and the swing each channel has seen |
+| `2` | motors | each wheel forward then back, to check the wiring |
+| `3` | servos | type `g75` / `a103` to find your own angles |
+| `4` | speed | 3 s straight run -> `CM_PER_S_AT_CAL` |
+| `5` | pivot | 4 turns -> `MS_PER_90DEG` |
+| `6` | deadband | ramps the duty until the wheels start -> `DUTY_DEADBAND` |
+| `0` | stop | brakes everything |
 
-No unsoldering needed.
+The motor driver is left disabled until a test needs it, and disabled again
+afterwards. Type `0` at any point to stop.
 
-### Checking the sensors
+**Wiring the motors.** There is no correct order for AO1/AO2 or BO1/BO2 - two
+plain wires, and which way round they go only decides which way that wheel
+turns. Wire left to AO1/AO2 and right to BO1/BO2 either way, run test `2`, and
+set `INVERT_LEFT` or `INVERT_RIGHT` in `config.h` for whichever ran backwards.
+No unsoldering.
 
-Set `DIAG_SENSORS 1` and upload. The robot never drives; it streams every
-channel's raw reading, its threshold and the resulting mask. Slide it on and off
-a line. You want each channel low over the mat and high over the tape with at
-least ~150 counts between, ideally 400+. A small swing is physical, not a
-threshold problem: bar height (aim 5-10 mm), a dirty sensor, a glossy surface,
-or the bar's own trimpot.
+**Reading the sensor test.** You want each channel low over the mat and high
+over the tape, with at least ~150 counts between - ideally 400+. A small swing
+is physical, not a threshold problem: bar height (aim 5-10 mm), a dirty sensor,
+a glossy surface, or the bar's own trimpot. The mission sketch also has
+`DIAG_SENSORS` and `DIAG_MOTORS` in `config.h` for the same checks in place.
 
 ## What changed from the slides, and why
 
