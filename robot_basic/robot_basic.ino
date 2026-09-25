@@ -123,32 +123,37 @@ void loop() {
 
 /* robot10 page 4 */
 void turn90(String direction){
+  trace(numGride, direction == "RIGHT" ? F("turn90 RIGHT") : F("turn90 LEFT"));
   moveFor();
-  delay(50);
+  delay(TURN_NUDGE_MS);
   stopRobot();
   if(direction == "RIGHT"){turnRight90();}
   else{turnLeft90();}
   stopRobot();
+  leaveCrossing();
   clearPid();
 }
 
 /* robot10 page 6 */
 void keep_item(String direction){
+  trace(numGride, F("keep_item  -- picking up"));
   moveFor();
-  delay(50);
+  delay(PICK_NUDGE_MS);
   stopRobot();
   delay(500);
   keepup_object();
   if(direction == "RIGHT"){turnRight180();}
   else{turnLeft180();}
   stopRobot();
+  leaveCrossing();
   clearPid();
 }
 
 /* robot10 page 9 */
 void place_item(String direction){
+  trace(numGride, F("place_item -- putting down"));
   moveFor();
-  delay(30);
+  delay(PLACE_NUDGE_MS);
   stopRobot();
   delay(500);
   put_object();
@@ -161,5 +166,6 @@ void place_item(String direction){
   }
   stopRobot();
   put_object();
+  leaveCrossing();
   clearPid();
 }

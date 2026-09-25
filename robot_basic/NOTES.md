@@ -14,6 +14,59 @@ Eight decks (robot04 to robot11) were transcribed independently by separate
 readers, and the assembled sketch was then audited line by line against all of
 them. What follows is what that turned up.
 
+## If it grabs the object and immediately drops it
+
+That happened, and it has a specific cause. Two of them, both fixed.
+
+**The turns were speeding up while they turned.** The slides' `turnRight90()`
+calls `upSpeed()` inside its own `while(true)` loop, so `sp` keeps climbing for
+as long as the turn lasts. A 180 is two of those back to back, so by the end the
+robot is spinning at full speed and the sensor bar can sweep straight past the
+pattern it is waiting for between two reads. It then carries on and stops on a
+LATER pattern, facing somewhere else.
+
+At the top of C4 that is easy to do, because the bar sweeps over the TOP line
+*and* the C4 column. A missed exit leaves the robot running west along the top
+line instead of south down the column. It counts C3, C2 and C1 on the way, the
+count runs ahead of the route, and it reaches `case 12: place_item` - which
+opens the gripper. Object picked up, object dropped, robot somewhere else.
+
+Turns now spin at a fixed `TURN_SPEED` instead of the ramping `sp`, the middle
+of the 180 drives the motors itself instead of coasting on whatever the previous
+90 left behind, and every turn has a timeout so it reports giving up rather than
+spinning forever.
+
+**And the count could run away on its own.** `countGrid()` stops a crossing
+being counted twice with `while(checkGrid());`, but that only works while the
+robot is still rolling. Every action ends with `stopRobot()`, which brakes. So a
+turn that finishes with the bar still over a crossing gets that crossing counted
+again, and again. Six spare counts takes you from `case 5` straight to
+`case 12`. `leaveCrossing()` now creeps forward until the bar is clear first.
+
+**Watch it happen.** `TRACE_ROUTE` is on and prints a line every time a case
+fires:
+
+```
+n=3  turn90 LEFT  saw 00011000
+n=5  keep_item  -- picking up  saw 11011000
+n=7  turn90 RIGHT  saw 00000111
+```
+
+If the numbers jump - 5 then 9 rather than 5 then 7 - the count ran away and
+that is the crossing to look at. If they are right but the robot is in the wrong
+place, the turn is overshooting and `TURN_SPEED` wants lowering.
+
+## If it stops before reaching the object
+
+The column line STOPS at the outer line. Once the bar is over that crossing
+there is no line ahead, `getSensor()` returns `00000000`, and `followLine()
+stops driving entirely. From there the only thing that carries the robot to the
+object is the nudge in `keep_item`, which the slides set to 50 ms. On a slow
+robot that is a couple of centimetres.
+
+Raise `PICK_NUDGE_MS` if it stops short. Lower it if it shoves the object away.
+`TURN_NUDGE_MS` and `PLACE_NUDGE_MS` are the same idea for the other two.
+
 ## If the robot does not move at all
 
 This is the most likely thing to happen first, and it is not a broken robot.

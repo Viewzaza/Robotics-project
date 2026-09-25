@@ -11,8 +11,10 @@
 #define INPUT 0
 #define INPUT_PULLUP 2
 
-// On AVR F() puts the literal in flash; on the host it is a no-op.
-#define F(x) (x)
+// On AVR F() puts the literal in flash and returns a __FlashStringHelper*.
+// On the host both collapse to a plain C string.
+typedef char __FlashStringHelper;
+#define F(x) ((const __FlashStringHelper*)(x))
 
 // Analog pin numbers, matching the real Nano mapping.
 enum { A0 = 14, A1, A2, A3, A4, A5, A6, A7 };

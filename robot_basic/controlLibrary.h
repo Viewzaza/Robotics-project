@@ -103,6 +103,58 @@ unsigned long tUpSp = 0;
 #define STARTUP_REPORT_MS 3000
 #define NO_LINE_WARN_MS   1000
 
+/* ---- turning ---------------------------------------------------------------
+ * THE TURNS RAMP UP WHILE THEY SPIN, AND THAT IS WHY THEY GO WRONG.
+ *
+ * The slides' turnRight90() calls upSpeed() inside its own while(true) loop, so
+ * `sp` keeps climbing for as long as the turn lasts. A 180 is two of those back
+ * to back, so by the end the robot is spinning at full speed and the bar can
+ * sweep straight past the pattern it was waiting for between two reads. It then
+ * keeps going and stops on a LATER pattern, facing somewhere else entirely.
+ *
+ * At the top of C4 that is very easy to do: the bar sweeps over the TOP line
+ * AND the C4 column, so a missed exit leaves the robot running west along the
+ * top line. It then counts C3, C2, C1 as it goes, the count runs ahead of the
+ * route, and it reaches `case 12: place_item` -- which opens the gripper. That
+ * is the "it grabs it and immediately drops it" you saw.
+ *
+ * So the turns now spin at a FIXED slow speed instead of the ramping one, and
+ * the middle of the 180 drives the motors itself rather than coasting on
+ * whatever the previous 90 left behind. Lower TURN_SPEED if turns still
+ * overshoot; raise it if the robot is too weak to turn at all. */
+#define TURN_SPEED          70
+#define TURN_TIMEOUT_MS   4000   /* give up rather than spin forever; 0 = never */
+
+/* ---- reaching the object ---------------------------------------------------
+ * The column line STOPS at the outer line, so once the bar is over that
+ * crossing there is no line ahead any more, getSensor() returns "00000000" and
+ * followLine() stops driving. From that point the only thing that moves the
+ * robot toward the object is the nudge below. The slides use 50 ms, which on a
+ * slow robot is a couple of centimetres. If it stops short of the object, raise
+ * PICK_NUDGE_MS. If it shoves the object away, lower it. */
+#define TURN_NUDGE_MS       50   /* robot10 p04 */
+#define PICK_NUDGE_MS       50   /* robot10 p06 */
+#define PLACE_NUDGE_MS      30   /* robot10 p09 */
+
+/* ---- after an action, get clear of the crossing ----------------------------
+ * countGrid() guards against counting the same crossing twice with
+ * `while(checkGrid());` -- but that only works while the robot is still
+ * rolling. Every action ends with stopRobot(), which BRAKES. So if a turn
+ * finishes with the bar still over a crossing, the very next countGrid() counts
+ * it again, and again, and the count runs away from the route. Six spare counts
+ * is all it takes to jump from `case 5: keep_item` to `case 12: place_item`,
+ * which opens the gripper -- the object gets picked up and dropped on the spot.
+ *
+ * leaveCrossing() creeps forward until the bar is clear before driving on. If
+ * it cannot get clear it gives up rather than sitting there. */
+#define LEAVE_CROSSING_MS  700   /* 0 to switch this off */
+
+/* ---- watching the route ----------------------------------------------------
+ * Prints the crossing count and what the sensors saw every time a case fires.
+ * This is how you find out WHERE it goes wrong: if the robot grabs the object
+ * and then drops it, this shows you whether the count jumped. */
+#define TRACE_ROUTE          1
+
 /* Set to 1 to print the sensor pattern while it drives, so you can watch what
  * it is actually seeing. Slows the loop down; turn it off for a real run. */
 #define SHOW_SENSORS         0
@@ -146,6 +198,34 @@ void sensorReport(){
   }
   Serial.println(F("--------------------------------"));
 }
+#endif
+
+#if LEAVE_CROSSING_MS
+/* Roll forward until the bar is off the crossing, so it is not counted twice. */
+void leaveCrossing(){
+  unsigned long t0 = millis();
+  while(checkGrid()){
+    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,TURN_SPEED);
+    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,TURN_SPEED);
+    if(millis() - t0 > LEAVE_CROSSING_MS){
+      Serial.println(F("leaveCrossing: still on a crossing, carrying on anyway"));
+      break;
+    }
+  }
+  stopRobot();
+}
+#else
+void leaveCrossing(){}
+#endif
+
+#if TRACE_ROUTE
+void trace(int n, const __FlashStringHelper *what){
+  Serial.print(F("n=")); Serial.print(n);
+  Serial.print(F("  ")); Serial.print(what);
+  Serial.print(F("  saw ")); Serial.println(getSensor());
+}
+#else
+void trace(int, const __FlashStringHelper*){}
 #endif
 
 void beginFnc(){
@@ -313,38 +393,58 @@ void moveFor(){
 
 void turnRight90(){
   String ch;
+  unsigned long t0 = millis();
   while(true){
-    upSpeed();
-    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,sp);
-    digitalWrite(F_R,0); digitalWrite(B_R,1); analogWrite(sp_R,sp);
+    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,TURN_SPEED);
+    digitalWrite(F_R,0); digitalWrite(B_R,1); analogWrite(sp_R,TURN_SPEED);
     ch = getSensor();
     if(ch == "00000011" || ch == "00000111" || ch == "00000110"){
       break;
     }
+#if TURN_TIMEOUT_MS
+    if(millis() - t0 > TURN_TIMEOUT_MS){
+      Serial.println(F("turnRight90: gave up, never saw the line"));
+      break;
+    }
+#endif
   }
 }
 
 void turnLeft90(){
   String ch;
+  unsigned long t0 = millis();
   while(true){
-    upSpeed();
-    digitalWrite(F_L,0); digitalWrite(B_L,1); analogWrite(sp_L,sp);
-    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,sp);
+    digitalWrite(F_L,0); digitalWrite(B_L,1); analogWrite(sp_L,TURN_SPEED);
+    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,TURN_SPEED);
     ch = getSensor();
     if(ch == "11000000" || ch == "11100000" || ch == "01100000"){
       break;
     }
+#if TURN_TIMEOUT_MS
+    if(millis() - t0 > TURN_TIMEOUT_MS){
+      Serial.println(F("turnLeft90: gave up, never saw the line"));
+      break;
+    }
+#endif
   }
 }
 
 void turnRight180(){
   turnRight90();
   String ch;
+  unsigned long t0 = millis();
   while(true){
+    /* Keep driving. The slides leave this loop with no motor command at all,
+     * so it coasts on whatever the 90 left behind. */
+    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,TURN_SPEED);
+    digitalWrite(F_R,0); digitalWrite(B_R,1); analogWrite(sp_R,TURN_SPEED);
     ch = getSensor();
     if(ch == "11000000" || ch == "10000000" || ch == "00000000"){
       break;
     }
+#if TURN_TIMEOUT_MS
+    if(millis() - t0 > TURN_TIMEOUT_MS) break;
+#endif
   }
   turnRight90();
 }
@@ -352,11 +452,17 @@ void turnRight180(){
 void turnLeft180(){
   turnLeft90();
   String ch;
+  unsigned long t0 = millis();
   while(true){
+    digitalWrite(F_L,0); digitalWrite(B_L,1); analogWrite(sp_L,TURN_SPEED);
+    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,TURN_SPEED);
     ch = getSensor();
     if(ch == "00000011" || ch == "00000001" || ch == "00000000"){
       break;
     }
+#if TURN_TIMEOUT_MS
+    if(millis() - t0 > TURN_TIMEOUT_MS) break;
+#endif
   }
   turnLeft90();
 }
