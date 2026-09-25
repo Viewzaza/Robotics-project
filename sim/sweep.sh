@@ -3,9 +3,13 @@
 # conditions and report how many complete all three placements.
 #
 #   ./sim/sweep.sh            # full sweep
+#   SECS=300 ./sim/sweep.sh   # raise the per-run time cap
 #   ./sim/sweep.sh quick      # smaller grid
 set -u
 cd "$(dirname "$0")/.."
+# Per-run simulated-time cap. A deliberately slow robot on a sagging battery
+# needs more than the original 200 s, or the cap itself reads as a failure.
+SECS="${SECS:-300}"
 
 SIM=./sim/sim.exe
 [ -x "$SIM" ] || SIM=./sim/sim
@@ -23,7 +27,7 @@ fi
 pass=0; total=0; FAILLOG=$(mktemp)
 for t in $TRIMS; do for v in $VMAXS; do for c in $CELLS; do for g in $GRIPS; do
   total=$((total+1))
-  score=$("$SIM" --quiet --secs=200 --trim=$t --vmax=$v --cell=$c --grip=$g 2>/dev/null \
+  score=$("$SIM" --quiet --secs=$SECS --trim=$t --vmax=$v --cell=$c --grip=$g 2>/dev/null \
           | sed -n 's/^score \([0-9]\)\/3$/\1/p')
   score=${score:-0}
   if [ "$score" = "3" ]; then pass=$((pass+1)); else

@@ -153,6 +153,35 @@ void setup() {
     Serial.println(F("WARNING: no EEPROM calibration, using compiled defaults"));
   }
 
+#if DIAG_MOTORS
+  /* Motor wiring check. Put the robot on a book so the wheels spin free. */
+  Serial.println(F("=== MOTOR DIAGNOSTIC -- put the wheels off the ground ==="));
+  Serial.println(F("each wheel runs forward then back; note any that are backwards"));
+  digitalWrite(STBY, 1);
+  for (;;) {
+    const __FlashStringHelper *what[4] = {
+      F("LEFT  forward  (wheel should roll the way the gripper points)"),
+      F("LEFT  reverse"),
+      F("RIGHT forward  (wheel should roll the way the gripper points)"),
+      F("RIGHT reverse")
+    };
+    for (uint8_t step = 0; step < 4; step++) {
+      Serial.println(what[step]);
+      switch (step) {
+        case 0: motors(DUTY_CAL, 0);        break;
+        case 1: motors(-DUTY_CAL, 0);       break;
+        case 2: motors(0, DUTY_CAL);        break;
+        default: motors(0, -DUTY_CAL);      break;
+      }
+      delay(1500);
+      brake();
+      delay(900);
+    }
+    Serial.println(F("-- set INVERT_LEFT / INVERT_RIGHT in config.h for any wrong one --"));
+    delay(1500);
+  }
+#endif
+
 #if DIAG_SENSORS
   /* Sensor meter. The robot never moves in this mode. */
   Serial.println(F("=== SENSOR DIAGNOSTIC -- the robot will not drive ==="));

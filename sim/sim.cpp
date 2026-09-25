@@ -178,6 +178,9 @@ int analogRead(int pin) {
 void sim_servo_write(int pin, int angle) {
   if (pin >= 0 && pin < 24) w_servoAngle[pin] = angle;
   if (pin != 5) return;                      // only the gripper servo matters here
+  /* Assumes SERVO_GRIP_CLOSED < 80 < SERVO_GRIP_OPEN. config.h is not visible
+   * this early in the file, so this stays a literal -- check it if you retune
+   * the gripper angles. */
   bool closing = angle <= 80;
   if (closing && !w_gripClosed) {
     double gx, gy;

@@ -270,8 +270,19 @@ static void measureScale(float dwellCm) {
 /* ==================================================================== motors */
 
 static void motorsRaw(int16_t l, int16_t r) {
+  /* Keep the LOGICAL duties for odometry -- it averages the two, so storing an
+   * inverted one would make forward motion look like a standstill. */
   g_dutyL = l;
   g_dutyR = r;
+  /* Which way round a motor's two wires go into AO1/AO2 (or BO1/BO2) decides
+   * which way it spins. There is no correct order: pick one, test it, and set
+   * these if it came out backwards. Cheaper than unsoldering. */
+#if INVERT_LEFT
+  l = (int16_t)-l;
+#endif
+#if INVERT_RIGHT
+  r = (int16_t)-r;
+#endif
   if (l > 0)      { WR_FL(1); WR_BL(0); analogWrite(sp_L, l); }
   else if (l < 0) { WR_FL(0); WR_BL(1); analogWrite(sp_L, -l); }
   else            { WR_FL(1); WR_BL(1); analogWrite(sp_L, 0); }

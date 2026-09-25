@@ -65,12 +65,17 @@
  * calibration mode ramps the duty up until the wheels start moving. */
 #define DUTY_DEADBAND      25
 
+/* Walking pace. Lowered from the original 170/90/80/110/70 after running on the
+ * real robot: slower is simply more reliable here. The bar is 9.5 cm ahead of
+ * the pivot, so every centimetre of overshoot past a crossing becomes a turn
+ * about the wrong point, and the slower the approach the smaller that error is.
+ * Raise DUTY_CRUISE again if you want a faster run and the counting still holds. */
 #define DUTY_MIN_MOVE     (DUTY_DEADBAND + 10)
-#define DUTY_CRUISE       170   /* line-following cruise                   */
-#define DUTY_APPROACH      90   /* slowed down near an expected junction   */
-#define DUTY_PRECISE       80   /* fixed-distance advances - repeatable    */
-#define DUTY_PIVOT        110   /* spinning on the spot                    */
-#define DUTY_START         70   /* speed right after a turn, before ramp   */
+#define DUTY_CRUISE       115   /* line-following cruise                   */
+#define DUTY_APPROACH      75   /* slowed down near an expected junction   */
+#define DUTY_PRECISE       70   /* fixed-distance advances - repeatable    */
+#define DUTY_PIVOT         95   /* spinning on the spot                    */
+#define DUTY_START         60   /* speed right after a turn, before ramp   */
 
 /* Ramp: how fast the cruise speed builds up, duty units per 10 ms. */
 #define RAMP_STEP           4
@@ -90,8 +95,14 @@
 
 /* Milliseconds for a 90 degree pivot at DUTY_PIVOT. Used as the coarse,
  * open-loop part of a turn; the line sensor then finishes the job. MEASURE ME:
- * calibration mode spins the robot for you to time it. */
-#define MS_PER_90DEG      584
+ * calibration mode spins the robot for you to time it.
+ *
+ * THIS VALUE IS TIED TO DUTY_PIVOT. Turn rate is roughly proportional to
+ * (DUTY_PIVOT - DUTY_DEADBAND), so if you change DUTY_PIVOT you must rescale
+ * this by the inverse ratio or every turn comes up short. Dropping the pivot
+ * duty from 110 to 95 took the numerator from 85 to 70, so this went from 584
+ * to 584 * 85/70 = 709. Re-measure it rather than trusting the arithmetic. */
+#define MS_PER_90DEG      709
 
 /* Left/right motor mismatch trim, percent applied to the right motor.
  * 100 = matched. MEASURE ME if the robot curves while driving "straight". */
@@ -178,13 +189,28 @@
  * Set back to 0 before running the mission. */
 #define DIAG_SENSORS        0
 
+/* Set to 1 to test the motor wiring. The robot lifts its wheels' worth of
+ * doubt: it drives LEFT forward alone, then LEFT back, then RIGHT forward,
+ * then RIGHT back, announcing each over serial. Put it on a book so the wheels
+ * spin free, watch, and set the INVERT flags below for whichever came out
+ * backwards. Set back to 0 afterwards. */
+#define DIAG_MOTORS         0
+
+/* Motor direction. Which way round each motor's two wires go into AO1/AO2 and
+ * BO1/BO2 decides which way that wheel turns, and neither order is "right" --
+ * they are just two plain wires. Wire them either way, run DIAG_MOTORS, and
+ * flip the flag for whichever wheel spun the wrong way. */
+#define INVERT_LEFT         0
+#define INVERT_RIGHT        0
+
 /* -------------------------------------------------------------- servos ---- */
+/* Measured on the real arm. */
 #define SERVO_GRIP_OPEN    140
-#define SERVO_GRIP_CLOSED   65
+#define SERVO_GRIP_CLOSED   75
 #define SERVO_GRIP_RELEASE 149
-#define SERVO_ARM_DOWN     105
-#define SERVO_ARM_CARRY     90
-#define SERVO_ARM_HIGH      40
+#define SERVO_ARM_DOWN     103
+#define SERVO_ARM_CARRY     70
+#define SERVO_ARM_HIGH      50
 
 /* Servos are stepped this many degrees every SERVO_STEP_MS instead of being
  * commanded straight to the target. A single 9 V alkaline cannot supply the

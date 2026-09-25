@@ -2,7 +2,7 @@
 
 Arduino line-following robot with a gripper arm.
 
-**Simulator result: 314 of 315 test conditions complete all three placements.
+**Simulator result: 315 of 315 test conditions complete all three placements.
 The original firmware completed 0 of 315.**
 
 ## Layout
@@ -138,7 +138,32 @@ Everything lives in `config.h`. The ones that matter most, in order:
 | `GRIP_REACH_CM` | Axle to jaws. Wrong by 1 cm and pick-ups start missing. |
 | `CELL_CM` | Grid pitch, used to slow down before the next crossing. |
 | `TRIM_R_PCT` | Raise/lower if the robot curves while driving straight. |
-| `ADC_PRESCALER` | Drop to `0x05` if the sensor mask looks unstable. |
+| `DUTY_CRUISE` | Walking pace. Lower is more reliable; raise it once counting holds. |
+| `ADC_PRESCALER` | Lower it (0x06) if the sensor mask still looks unstable. |
+
+### Wiring the motors
+
+There is no correct order for AO1/AO2 or BO1/BO2 - they are two plain wires, and
+which way round they go just decides which way that wheel turns. Wire left to
+AO1/AO2 and right to BO1/BO2 either way round, then:
+
+1. Set `DIAG_MOTORS 1` in `config.h`, upload, put the robot on a book so the
+   wheels spin free.
+2. It runs left forward, left back, right forward, right back, announcing each
+   over serial.
+3. Set `INVERT_LEFT` or `INVERT_RIGHT` to 1 for whichever wheel ran backwards,
+   and `DIAG_MOTORS` back to 0.
+
+No unsoldering needed.
+
+### Checking the sensors
+
+Set `DIAG_SENSORS 1` and upload. The robot never drives; it streams every
+channel's raw reading, its threshold and the resulting mask. Slide it on and off
+a line. You want each channel low over the mat and high over the tape with at
+least ~150 counts between, ideally 400+. A small swing is physical, not a
+threshold problem: bar height (aim 5-10 mm), a dirty sensor, a glossy surface,
+or the bar's own trimpot.
 
 ## What changed from the slides, and why
 
