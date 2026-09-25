@@ -315,6 +315,13 @@ void followLine(){
     if(speedR<0){speedR=0;}
     digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,speedL);
     digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,speedR);
+    /* robot11 p08 ends followLine() with this line live. robot07 p05 shows it
+     * commented out and robot08 p04 leaves it out entirely. Kept commented,
+     * like robot07: at 9600 baud a line like this takes about 15 ms to send
+     * once the serial buffer fills, which is far longer than the control loop,
+     * so leaving it live makes the robot follow the line visibly worse.
+     * Uncomment it if you want to watch the wheel speeds. */
+    //Serial.println(String(speedL) + "," + String(speedR));
   }
 }
 

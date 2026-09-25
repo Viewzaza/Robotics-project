@@ -10,8 +10,9 @@ it is this one.
 | `pidLibrary.h` | the file from the course Google Drive, unchanged |
 | `robot_basic.ino` | robot10's structure, with the route rewritten for the e33 field |
 
-Six slide decks were transcribed independently and cross-checked against this.
-What follows is what that turned up.
+Eight decks (robot04 to robot11) were transcribed independently by separate
+readers, and the assembled sketch was then audited line by line against all of
+them. What follows is what that turned up.
 
 ## Reading the line: it does this by itself now
 
@@ -67,14 +68,57 @@ Change the one line at the top of `controlLibrary.h` to go back.
 
 Everything else is the slides.
 
+## The threshold: the slides say 800 in three places and 500 in one
+
+This is the one that decides whether the robot can see the line at all.
+
+| slide | code | threshold |
+|---|---|---|
+| robot04 p11 | `if(analogRead(A0) >= 800)` | **800** |
+| robot04 p12 | `if(analogRead(sensorPin[i])>=800)` | **800** |
+| robot07 p07 | `if(analogRead(sensorPin[i]) >= 800)` | **800** |
+| robot11 p06 | `if(analogRead(sensorPin[i]) >= 500)` | 500 |
+
+robot04 p10 settles it by showing what the teacher's own bar reads:
+
+```
+over white (พื้นที่สีขาว):  246  246  245  245  245  245
+over black (พื้นที่สีดำ):   979  978  979  979  979  979
+```
+
+With 734 counts of contrast either number works, but 800 sits well clear of the
+white readings while 500 is only 255 counts above them. This file uses **800**.
+
+robot04 p12 also states the convention outright: **1 = the sensor is over the
+black line, 0 = over white.**
+
 ## Where the slides disagree with themselves
 
-**`round()` in `followLine`.** robot06 p12 - the slide that actually teaches the
-function - has `map(round(pidOut),-7,7,-sp,sp)`, with a callout labelling
-`round()` as "ฟังก์ปัดจุดทศนิยม". The robot11 summary slide drops it and shows
-`map(pidOut,...)`. This file keeps `round()`, because robot06 is the lesson and
-robot11 is a recap. Without it the float truncates toward zero and steering is
-slightly asymmetric.
+**`round()` in `followLine`.** Four pages have it and one does not:
+robot06 p08, p09, p10, p11, p12 (p08 even has a callout pointing at `round`
+reading "ฟังก์ปัดจุดทศนิยม"), robot07 p05, and robot08 p04 all show
+`map(round(pidOut),-7,7,-sp,sp)`. Only robot11 p08 drops it. This file keeps
+it. `map()` takes a `long`, so without `round()` the float truncates toward
+zero and steering is asymmetric by one count near the edges.
+
+**The trailing `Serial.println` in `followLine`.** robot11 p08 ends the function
+with `Serial.println(String(speedL) + "," + String(speedR));` live. robot07 p05
+shows the same line commented out, and robot08 p04 omits it. It is present here
+but commented out, like robot07 - at 9600 baud that line takes about 15 ms to
+send once the buffer fills, which is far longer than one pass of the control
+loop, so leaving it live makes the line following visibly worse.
+
+**`stopRobot()` and `sp = 50;`.** robot07 p13 has three lines and no reset;
+robot07 p14 adds `sp = 50;` with the callout "กำหนด Speed เริ่มต้นใหม่", and
+robot11 p11 keeps it. Included here, following the later versions.
+
+**Where `digitalWrite(STBY,1)` goes in `beginFnc()`.** robot07 p04 puts it
+before `clearPid()` with no servos yet; robot09 p06 puts it before the servo
+lines; robot11 p05 puts it after them. This follows robot11, the last version.
+
+**The nudge before a turn.** robot08 p06/p11 use `delay(50)`; robot09 p10 uses
+`delay(40)` throughout; robot10 uses 50 for `turn90`, 50 for `keep_item` and 30
+for `place_item`. This follows robot10, the deck the helpers come from.
 
 **The gripper release angle.** In robot11, `beginFnc()` opens the gripper with
 `servo_x.write(140)` but `put_object()` releases with `servo_x.write(149)`. Both
@@ -93,6 +137,30 @@ variable `numGride`, function `countGrid`.
 (three sensors) while +1 is `"00011100"`, and -4 is `"01100000"` while +4 is
 `"00000110"`. That is what the slides show, on both robot06 p06 and robot11 p07,
 so it is transcribed as-is rather than "corrected".
+
+## What is in this file that is not on any slide
+
+The audit found four additions beyond the three declared departures. None
+change what the course code does; they are listed so nothing is hidden.
+
+- `tUpSp = millis();` at the end of `beginFnc()`. No slide sets it there. It
+  only makes the first speed-ramp tick land 10 ms after start-up instead of
+  immediately.
+- `SHOW_SENSORS` and `showSensors()`. Compiled out at 0, so inert unless you
+  turn it on.
+- `getSensor()` is restructured to read into a variable first, so the
+  calibrated threshold and the polarity flag can be applied. With
+  `AUTO_CALIBRATE 0` and `SENSOR_ACTIVE_LOW 0` it behaves exactly as the slides.
+- Forward declarations for `turn90`, `keep_item` and `place_item` in the .ino.
+  Redundant under Arduino's auto-prototyping, but harmless and they make the
+  `String` arguments explicit.
+
+## One thing that cannot be checked
+
+`pidLibrary.h` appears on no slide in decks 04 to 11. robot06 p07 shows the tab
+and points at it, and p07 and p11 carry only a download link. So `pidFNC`, its
+integral clamp, and `clearPid` cannot be verified against the course material -
+the copy here is the file you supplied, unchanged.
 
 ## Things the slides do that are worth knowing about
 
