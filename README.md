@@ -14,6 +14,7 @@ The original firmware completed 0 of 315.**
 | `robot_countGride/hal.h` | Sensing, odometry, motion primitives, AVR fast paths |
 | `robot_countGride/controlLibrary.h` | The API the slides use, rebuilt on `hal.h` |
 | `robot_countGride/pidLibrary.h` | Course PID helper, with three guards added |
+| `robot_motor_test/robot_motor_test.ino` | Upload-and-watch motor check, no serial input needed |
 | `robot_test/robot_test.ino` | Standalone bench test rig: sensors, motors, servos, calibration |
 | `sim/` | Host-side simulator - field, kinematics, sensor bar, gripper |
 
@@ -164,9 +165,14 @@ afterwards. Type `0` at any point to stop.
 
 **Wiring the motors.** There is no correct order for AO1/AO2 or BO1/BO2 - two
 plain wires, and which way round they go only decides which way that wheel
-turns. Wire left to AO1/AO2 and right to BO1/BO2 either way, run test `2`, and
-set `INVERT_LEFT` or `INVERT_RIGHT` in `config.h` for whichever ran backwards.
-No unsoldering.
+turns. Wire left to AO1/AO2 and right to BO1/BO2 either way, then check it.
+
+For just the motors there is `robot_motor_test/robot_motor_test.ino`: upload it,
+put the robot on a book, and watch. It loops A forward, A back, B forward,
+B back, both forward, both back, spin - announcing each over serial at 115200,
+with no typing. Whichever wheel runs backwards, set `INVERT_LEFT` or
+`INVERT_RIGHT` to 1 in `config.h`, or just swap that motor's two wires. No
+unsoldering needed if you use the flag.
 
 **Reading the sensor test.** You want each channel low over the mat and high
 over the tape, with at least ~150 counts between - ideally 400+. A small swing
