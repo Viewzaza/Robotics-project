@@ -14,47 +14,53 @@ Eight decks (robot04 to robot11) were transcribed independently by separate
 readers, and the assembled sketch was then audited line by line against all of
 them. What follows is what that turned up.
 
-## Reading the line: it does this by itself now
+## If the robot does not move at all
 
-`AUTO_CALIBRATE` is on. Nothing to press, nothing to measure, nothing to type.
+This is the most likely thing to happen first, and it is not a broken robot.
 
-Put the robot on the line and switch it on. It rocks left, right, right, left -
-equal time each way - so the sensor bar sweeps across the line several times
-while it watches every channel. From that it sets a threshold per channel from
-what that channel actually saw, rather than assuming the slides' fixed 500.
+`followLine()` writes to the motors only inside `if(errorInput != 100)`, and
+there is no `else`. `getErrorInput()` returns 100 for any pattern that is not
+one of its fifteen. So if no sensor reads past `LINE_THRESHOLD`, the pattern is
+`00000000`, the error is 100, nothing is written, and the robot sits there with
+its motors braked. That is the slides' own behaviour - but it looks exactly like
+a dead robot.
 
-It works out the polarity on its own too, which is the part that is easy to get
-wrong by hand. The tape is thin and the mat is wide, so each sensor spends most
-of the sweep looking at the mat. Whichever side of the middle a channel sits on
-MOST of the time is therefore the mat, and the line is the other side. So it
-does not matter whether your bar reads high or low over black - it finds out.
+**So the threshold being too HIGH is the worse of the two failures.** Too low
+and the robot at least moves and you can see it misbehaving. Too high and it
+does nothing and tells you nothing. That is why this file uses 500 rather than
+robot04's 800.
 
-The rocking is symmetric, so the robot finishes pointing where it started, and
-it then squares itself back up on the line before the mission begins.
+Two things now tell you what is going on, both over serial at 9600:
 
-It prints what it decided, at 9600 baud:
+**At start-up** it prints every channel's raw value for three seconds before the
+mission begins. Slide the robot on and off the line while it does:
 
 ```
---- auto calibration ---
-  A0  low 100  high 900  swing 800  threshold 500
-  ...
-  line reads BRIGHTER than the mat
-  usable channels: 8
-------------------------
+--- sensors, before starting ---
+threshold is 500
+100 100 100 900 900 100 100 100   -> 00011000
 ```
 
-**Read the swing column.** That is the real health check. Under 120 counts and a
-channel is flagged too flat to use, and no threshold can rescue it - that is
-physical: bar height (aim 5-10 mm off the surface), a dirty or dead sensor, a
-glossy surface, or the bar's own trimpot. If fewer than 3 channels are usable it
-says so and falls back to the fixed threshold.
+Set `LINE_THRESHOLD` to halfway between what a channel reads over white and what
+it reads over the tape. If the two are less than about 150 apart, that is
+physical and no threshold fixes it - bar height (5-10 mm off the surface), dirt,
+a glossy surface, or the bar's trimpot.
 
-**If it says NOT ENOUGH CONTRAST**, the most likely reason is that the robot was
-not on a line when you switched it on, so the sweep never crossed one.
+If the numbers go **down** when a sensor moves onto the tape, set
+`SENSOR_ACTIVE_LOW 1`. Otherwise every pattern is inverted and no threshold
+helps.
 
-Turning it off: set `AUTO_CALIBRATE 0` and it uses `LINE_THRESHOLD` and
-`SENSOR_ACTIVE_LOW` exactly as the slides do. `SHOW_SENSORS 1` prints the live
-pattern while driving if you want to watch.
+**While it drives**, if the pattern stays unrecognised for a second it prints
+why it is not moving, with the live readings, rather than leaving you guessing:
+
+```
+no line: pattern 00000000  raw 210 205 198 215 ... vs threshold 500
+```
+
+Set `STARTUP_REPORT 0` and `NO_LINE_WARN_MS 0` to silence both once it works.
+
+There is no automatic calibration. The thresholds are fixed numbers you set,
+as the slides have them.
 
 ## Two things here are yours, not the slides'
 

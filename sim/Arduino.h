@@ -62,6 +62,7 @@ struct SerialClass {
   void begin(long) {}
   void print(const String& v)   { if (echo) printf("%s", v.c_str()); }
   void print(const char* v)     { if (echo) printf("%s", v); }
+  void print(char v)            { if (echo) printf("%c", v); }   /* Arduino has this; without it ' ' prints as 32 */
   void print(int v)             { if (echo) printf("%d", v); }
   void print(long v)            { if (echo) printf("%ld", v); }
   void print(double v)          { if (echo) printf("%g", v); }

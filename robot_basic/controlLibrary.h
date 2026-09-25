@@ -60,59 +60,53 @@ unsigned long tUpSp = 0;
  *   robot11 p06, the summary:
  *       if(analogRead(sensorPin[i]) >= 500)
  *
- * robot04 p10 shows what the teacher's own bar reads, and it is why 800 is the
- * better default:
+ * robot04 p10 shows what the teacher's own bar reads:
  *       over white  (พื้นที่สีขาว):  245, 246, 245 ...
  *       over black  (พื้นที่สีดำ):   979, 978, 979 ...
- * With that much contrast either number works, but 800 sits well clear of the
- * white readings, so a bit of stray light cannot push a white patch over the
- * line. 500 is only 255 counts above white.
+ * With that much contrast either number works. This file uses 500, the lower of
+ * the two, ON PURPOSE: a threshold that is too HIGH is the worse failure. If no
+ * sensor ever reads past it, getSensor() returns "00000000", getErrorInput()
+ * returns 100, and followLine() writes nothing to the motors at all - the robot
+ * just sits there looking dead. A threshold that is too low at least moves.
  *
- * On YOUR bar these numbers may be nothing like 245/979, which is the whole
- * problem with a fixed threshold - see AUTO_CALIBRATE below, which measures
- * them instead of assuming.
+ * On YOUR bar these numbers may be nothing like 245/979. Read your own with
+ * STARTUP_REPORT below and set this from them: halfway between what a channel
+ * reads over white and what it reads over the tape.
  *
  * 1 means the sensor is over the BLACK LINE, 0 means over the white surface
  * (robot04 p12 states this explicitly).
  *
  * SENSOR_ACTIVE_LOW is for a bar wired the other way round, where black reads
- * LOW. The teacher's bar reads black HIGH, so this is 0. If yours is inverted
- * every pattern in getErrorInput and checkGrid is inverted with it and no
- * threshold value can help - AUTO_CALIBRATE detects this for you. */
-#define LINE_THRESHOLD     800
+ * LOW. The teacher's bar reads black HIGH, so this is 0. If your raw numbers go
+ * DOWN when a sensor moves onto the tape, set this to 1; otherwise every
+ * pattern in getErrorInput and checkGrid is inverted and no threshold helps. */
+#define LINE_THRESHOLD     500
 #define SENSOR_ACTIVE_LOW    0
 
-/* ---- AUTOMATIC -----------------------------------------------------------
- * With this on, the two settings above are only fallbacks. At switch-on the
- * robot works them out for itself: it rocks left and right a few times so the
- * bar sweeps across the line, watches what every channel does, and sets a
- * threshold per channel from what it actually saw.
+/* ---- why is it not moving? -----------------------------------------------
+ * followLine() only writes to the motors inside `if(errorInput != 100)`, and
+ * there is no else. getErrorInput() returns 100 for any pattern that is not one
+ * of its fifteen. So if no sensor reads past LINE_THRESHOLD, the pattern is
+ * "00000000", the error is 100, nothing is written, and THE ROBOT SITS STILL
+ * with its motors braked. That is the slides' behaviour, not a fault - but it
+ * looks identical to a dead robot.
  *
- * It works out the polarity on its own too. The line is thin and the mat is
- * wide, so during the sweep each sensor spends most of its time over the mat.
- * Whichever side of the middle a channel sits on MOST of the time is therefore
- * the mat, and the line is the other side. No need to know whether your bar
- * reads high or low over black.
+ * STARTUP_REPORT prints every sensor's raw value for a few seconds before the
+ * mission starts, so you can read your own numbers off the serial monitor and
+ * set LINE_THRESHOLD from them. It does not move the robot and does not change
+ * anything: it just tells you what the sensors see.
  *
- * The rocking is symmetric -- equal time each way -- so the robot ends up
- * pointing where it started, and it then squares itself back up on the line
- * before the mission begins.
- *
- * Set to 0 to go back to the fixed numbers above. */
-#define AUTO_CALIBRATE       1
-#define CAL_DUTY            70   /* how hard it rocks; slow is fine        */
-#define CAL_MS             500   /* per quarter of the rocking sequence    */
-#define CAL_MIN_SWING      120   /* below this a channel is called useless */
+ * NO_LINE_WARN_MS then watches while it drives: if the pattern stays
+ * unrecognised for this long it prints why it is not moving, rather than
+ * leaving you guessing. 0 turns it off. */
+#define STARTUP_REPORT       1
+#define STARTUP_REPORT_MS 3000
+#define NO_LINE_WARN_MS   1000
 
 /* Set to 1 to print the sensor pattern while it drives, so you can watch what
  * it is actually seeing. Slows the loop down; turn it off for a real run. */
 #define SHOW_SENSORS         0
 
-int  senseThr[8];                /* per-channel threshold, filled at startup */
-bool senseActiveLow = SENSOR_ACTIVE_LOW;
-bool senseCalibrated = false;
-
-void autoCalibrate();
 void beginFnc();
 String getSensor();
 int getErrorInput(String L);
@@ -130,98 +124,29 @@ void keepup_object();
 void put_object();
 void arm_over_head(); //ยกแขนสูง
 
-/* Rock the robot on the spot so the sensor bar sweeps across the line. */
-void calSpin(int dir,int duty){
-  if(dir > 0){
-    digitalWrite(F_L,1); digitalWrite(B_L,0); analogWrite(sp_L,duty);
-    digitalWrite(F_R,0); digitalWrite(B_R,1); analogWrite(sp_R,duty);
-  }else{
-    digitalWrite(F_L,0); digitalWrite(B_L,1); analogWrite(sp_L,duty);
-    digitalWrite(F_R,1); digitalWrite(B_R,0); analogWrite(sp_R,duty);
-  }
-}
 
-void autoCalibrate(){
-  int lo[8], hi[8];
-  unsigned long sum[8];
-  unsigned long n = 0;
-  for(int i=0;i<8;i++){ lo[i]=1023; hi[i]=0; sum[i]=0; }
-
-  /* Left, right, right, left: equal time each way, so the robot finishes
-   * pointing where it started. Four passes means the bar crosses the line
-   * several times even if it began sitting squarely on it. */
-  int seq[4] = {-1, 1, 1, -1};
-  for(int k=0;k<4;k++){
-    calSpin(seq[k], CAL_DUTY);
-    unsigned long t0 = millis();
-    while(millis() - t0 < CAL_MS){
-      for(int i=0;i<8;i++){
-        int v = analogRead(sensorPin[i]);
-        if(v < lo[i]) lo[i] = v;
-        if(v > hi[i]) hi[i] = v;
-        sum[i] += (unsigned long)v;
-      }
-      n++;
-    }
-  }
-  stopRobot();
-
-  /* Threshold halfway between the two surfaces this channel actually saw. */
-  int usable = 0;
-  for(int i=0;i<8;i++){
-    senseThr[i] = (lo[i] + hi[i]) / 2;
-    if(hi[i] - lo[i] >= CAL_MIN_SWING) usable++;
-  }
-
-  /* Polarity. The tape is thin and the mat is wide, so each sensor spent most
-   * of the sweep over the mat -- which means the AVERAGE reading sits on the
-   * mat's side of the middle. If the average is above the middle, the mat is
-   * the bright side and the line is the dark one, so the line is ACTIVE LOW.
-   * Every channel votes; the majority wins. */
-  int votesLow = 0;
-  for(int i=0;i<8;i++){
-    if(hi[i] - lo[i] < CAL_MIN_SWING) continue;     /* a flat channel gets no vote */
-    unsigned long mean = n ? (sum[i] / n) : 0;
-    if((int)mean > senseThr[i]) votesLow++;
-  }
-  senseActiveLow = (votesLow * 2 > usable);
-  senseCalibrated = (usable >= 3);
-
+#if STARTUP_REPORT
+/* Read every channel out loud for a few seconds before the mission begins. */
+void sensorReport(){
   Serial.println();
-  Serial.println(F("--- auto calibration ---"));
-  for(int i=0;i<8;i++){
-    Serial.print(F("  A")); Serial.print(i);
-    Serial.print(F("  low ")); Serial.print(lo[i]);
-    Serial.print(F("  high ")); Serial.print(hi[i]);
-    Serial.print(F("  swing ")); Serial.print(hi[i]-lo[i]);
-    Serial.print(F("  threshold ")); Serial.print(senseThr[i]);
-    if(hi[i]-lo[i] < CAL_MIN_SWING) Serial.print(F("   <-- too flat to use"));
-    Serial.println();
-  }
-  Serial.print(F("  line reads ")); Serial.println(senseActiveLow ? F("DARKER than the mat") : F("BRIGHTER than the mat"));
-  Serial.print(F("  usable channels: ")); Serial.println(usable);
-  if(!senseCalibrated){
-    Serial.println(F("  NOT ENOUGH CONTRAST -- falling back to the fixed threshold."));
-    Serial.println(F("  Start the robot ON a line, and check the bar is 5-10 mm off the surface."));
-  }
-  Serial.println(F("------------------------"));
-}
-
-/* Square up on the line after calibrating, so the mission starts straight. */
-void centreOnLine(){
+  Serial.println(F("--- sensors, before starting ---"));
+  Serial.print(F("threshold is ")); Serial.println(LINE_THRESHOLD);
+  Serial.println(F("slide the robot on and off the line and watch"));
+  Serial.println(F("want: LOW over white, HIGH over black, threshold in between"));
   unsigned long t0 = millis();
-  while(millis() - t0 < 2500){
-    String ch = getSensor();
-    if(ch.charAt(3) == '1' || ch.charAt(4) == '1') break;   /* middle sensors */
-    /* turn toward whichever side can see it */
-    int seen = -1;
-    for(int i=0;i<8;i++){ if(ch.charAt(i) == '1'){ seen = i; break; } }
-    if(seen < 0){ calSpin(1, CAL_DUTY); }                   /* nothing: just look */
-    else if(seen < 3){ calSpin(-1, CAL_DUTY); }             /* line is to the left */
-    else { calSpin(1, CAL_DUTY); }
+  while(millis() - t0 < STARTUP_REPORT_MS){
+    for(int i=0;i<8;i++){
+      int v = analogRead(sensorPin[i]);
+      if(v<100) Serial.print(F(" "));
+      if(v<10)  Serial.print(F(" "));
+      Serial.print(v); Serial.print(F(" "));
+    }
+    Serial.print(F("  -> ")); Serial.println(getSensor());
+    delay(250);
   }
-  stopRobot();
+  Serial.println(F("--------------------------------"));
 }
+#endif
 
 void beginFnc(){
   pinMode(sp_L,OUTPUT); pinMode(F_L,OUTPUT); pinMode(B_L,OUTPUT);
@@ -236,10 +161,8 @@ void beginFnc(){
 
   digitalWrite(STBY,1);
 
-#if AUTO_CALIBRATE
-  autoCalibrate();
-  centreOnLine();
-  delay(300);
+#if STARTUP_REPORT
+  sensorReport();
 #endif
 
   clearPid();
@@ -250,8 +173,11 @@ String getSensor(){
   String x = "";
   for(int i=0;i<8;i++){
     int v = analogRead(sensorPin[i]);
-    int thr = senseCalibrated ? senseThr[i] : LINE_THRESHOLD;
-    bool onLine = senseActiveLow ? (v <= thr) : (v >= thr);
+#if SENSOR_ACTIVE_LOW
+    bool onLine = (v <= LINE_THRESHOLD);
+#else
+    bool onLine = (v >= LINE_THRESHOLD);
+#endif
     if(onLine){
       x += "1";
     }else{
@@ -296,12 +222,31 @@ int getErrorInput(String L){
   return(e);
 }
 
+unsigned long tNoLine = 0;
+
 void followLine(){
 #if SHOW_SENSORS
   showSensors();
 #endif
   detectLine = getSensor();
   int errorInput = getErrorInput(detectLine);
+
+#if NO_LINE_WARN_MS
+  /* Say so, rather than just sitting there looking broken. */
+  if(errorInput == 100){
+    if(tNoLine == 0) tNoLine = millis();
+    else if(millis() - tNoLine > NO_LINE_WARN_MS){
+      tNoLine = millis();
+      Serial.print(F("no line: pattern ")); Serial.print(detectLine);
+      Serial.print(F("  raw "));
+      for(int i=0;i<8;i++){ Serial.print(analogRead(sensorPin[i])); Serial.print(F(" ")); }
+      Serial.print(F(" vs threshold ")); Serial.println(LINE_THRESHOLD);
+    }
+  }else{
+    tNoLine = 0;
+  }
+#endif
+
   if(errorInput != 100){
     float pidOut = pidFNC(errorInput,0,1,0,0.7);
     upSpeed();
