@@ -53,20 +53,33 @@ unsigned long tUpSp = 0;
 #define ARM_HIGH       50
 
 /* ---- reading the line ----------------------------------------------------
- * The slides hard-code `analogRead(sensorPin[i]) >= 500` in getSensor(). 500 is
- * a guess about where YOUR bar sits, and if it guesses wrong the robot reads no
- * line at all however good the sensors are.
+ * THE SLIDES GIVE TWO DIFFERENT THRESHOLDS.
  *
- * Set LINE_THRESHOLD to halfway between what a channel reads over the white mat
- * and what it reads over the tape. Use robot_test.ino option 1 to get those two
- * numbers -- it prints every channel live and tracks the swing.
+ *   robot04 p11 and p12, the lesson that actually teaches sensing:
+ *       if(analogRead(sensorPin[i]) >= 800)
+ *   robot11 p06, the summary:
+ *       if(analogRead(sensorPin[i]) >= 500)
  *
- * SENSOR_ACTIVE_LOW matters just as much. Some bars output a HIGH voltage over
- * white and a LOW one over black; others are the other way round. The slides
- * assume black reads HIGH. If your raw numbers go DOWN when you slide a sensor
- * onto the tape, set this to 1 -- otherwise every pattern is inverted and
- * nothing works no matter what threshold you pick. */
-#define LINE_THRESHOLD     500
+ * robot04 p10 shows what the teacher's own bar reads, and it is why 800 is the
+ * better default:
+ *       over white  (พื้นที่สีขาว):  245, 246, 245 ...
+ *       over black  (พื้นที่สีดำ):   979, 978, 979 ...
+ * With that much contrast either number works, but 800 sits well clear of the
+ * white readings, so a bit of stray light cannot push a white patch over the
+ * line. 500 is only 255 counts above white.
+ *
+ * On YOUR bar these numbers may be nothing like 245/979, which is the whole
+ * problem with a fixed threshold - see AUTO_CALIBRATE below, which measures
+ * them instead of assuming.
+ *
+ * 1 means the sensor is over the BLACK LINE, 0 means over the white surface
+ * (robot04 p12 states this explicitly).
+ *
+ * SENSOR_ACTIVE_LOW is for a bar wired the other way round, where black reads
+ * LOW. The teacher's bar reads black HIGH, so this is 0. If yours is inverted
+ * every pattern in getErrorInput and checkGrid is inverted with it and no
+ * threshold value can help - AUTO_CALIBRATE detects this for you. */
+#define LINE_THRESHOLD     800
 #define SENSOR_ACTIVE_LOW    0
 
 /* ---- AUTOMATIC -----------------------------------------------------------
