@@ -74,5 +74,42 @@ struct SerialClass {
   void println(int v)           { if (echo) printf("%d\n", v); }
   void println(long v)          { if (echo) printf("%ld\n", v); }
   void println(double v)        { if (echo) printf("%g\n", v); }
+
+  /* Real-Arduino overloads that the one-argument set above cannot express.
+   * Every one of these calls was a compile error before (unsigned arguments
+   * were ambiguous, two-argument forms did not exist), so adding them changes
+   * no existing output -- they only let calibration / diagnostic code that
+   * builds for the Nano also build here. */
+  void print(unsigned int v)            { if (echo) printf("%u", v); }
+  void print(unsigned long v)           { if (echo) printf("%lu", v); }
+  void println(unsigned int v)          { if (echo) printf("%u\n", v); }
+  void println(unsigned long v)         { if (echo) printf("%lu\n", v); }
+  void print(long v, int base)          { if (echo) printBase(v, base); }
+  void print(int v, int base)           { print((long)v, base); }
+  void print(unsigned long v, int base) { if (echo) printBaseU(v, base); }
+  void print(unsigned int v, int base)  { print((unsigned long)v, base); }
+  void print(double v, int digits)      { if (echo) printf("%.*f", digits < 0 ? 0 : digits, v); }
+  void println(long v, int base)          { print(v, base); println(); }
+  void println(int v, int base)           { print(v, base); println(); }
+  void println(unsigned long v, int base) { print(v, base); println(); }
+  void println(unsigned int v, int base)  { print(v, base); println(); }
+  void println(double v, int digits)      { print(v, digits); println(); }
+private:
+  static void printBaseU(unsigned long v, int base) {
+    if (base < 2 || base > 16) base = 10;
+    char b[40]; int n = 0;
+    do { b[n++] = "0123456789ABCDEF"[v % (unsigned)base]; v /= (unsigned)base; } while (v);
+    while (n) putchar(b[--n]);
+  }
+  static void printBase(long v, int base) {
+    /* Arduino prints negative numbers with a sign only in base 10; other
+     * bases show the two's-complement bit pattern. */
+    if (base == 10 && v < 0) { putchar('-'); printBaseU(0UL - (unsigned long)v, 10); }
+    else printBaseU((unsigned long)v, base);
+  }
 };
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
 extern SerialClass Serial;

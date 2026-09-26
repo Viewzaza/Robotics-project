@@ -8,3 +8,6 @@ sim/sim.exe
 
 # Downloaded archives
 *.zip
+
+# Simulator builds of other sketches
+sim/*.exe
