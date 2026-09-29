@@ -62,6 +62,8 @@ template <class T> inline T constrain(T v, T lo, T hi) { return v < lo ? lo : (v
 struct SerialClass {
   bool echo = false;
   void begin(long) {}
+  int available() { return 0; }          /* nobody types in the simulator */
+  int read() { return -1; }
   void print(const String& v)   { if (echo) printf("%s", v.c_str()); }
   void print(const char* v)     { if (echo) printf("%s", v); }
   void print(char v)            { if (echo) printf("%c", v); }   /* Arduino has this; without it ' ' prints as 32 */

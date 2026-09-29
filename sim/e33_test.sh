@@ -6,13 +6,20 @@
 #   ./sim/e33_test.sh                 # the standard list below
 #   ./sim/e33_test.sh "--trimL=0.6 --dbL=50" "--overhang=3"   # your own conditions
 #   VERBOSE=1 ./sim/e33_test.sh "--trimL=0.6"                 # show the firmware's trace
+#   FW=robot_e33 ./sim/e33_test.sh    # test another sketch folder (default robot_e33_v2)
+#   DEFS="-DROUTE_ORDER=132" ./sim/e33_test.sh   # extra defines for both builds (the other route)
+#   PATHCHECK=1 ./sim/e33_test.sh     # also check every count of the calibrated mission against
+#                                     # the route (sim/path_check.py): a "path" column, and why not
 #
 # Every run places the robot the way robot_e33 expects: axle over C1 (--startx=0).
 set -u
 cd "$(dirname "$0")/.."
 BUILD="g++ -O2 -std=c++14 -I sim"
-$BUILD -DFIRMWARE_INO='"../robot_e33/robot_e33.ino"' -o sim/sim_e33.exe sim/sim.cpp || exit 2
-$BUILD -DROBOT_MODE=1 -DFIRMWARE_INO='"../robot_e33/robot_e33.ino"' -o sim/sim_e33cal.exe sim/sim.cpp || exit 2
+FW="${FW:-robot_e33_v2}"
+INO="\"../$FW/$FW.ino\""
+DEFS="${DEFS:-}"
+$BUILD $DEFS -DFIRMWARE_INO="$INO" -o sim/sim_e33.exe sim/sim.cpp || exit 2
+$BUILD $DEFS -DROBOT_MODE=1 -DFIRMWARE_INO="$INO" -o sim/sim_e33cal.exe sim/sim.cpp || exit 2
 
 if [ $# -gt 0 ]; then
   CONDS=("$@")
@@ -28,11 +35,18 @@ else
     "--trimL=0.75 --white=300 --black=650 --edge=0.8"  # weak bar contrast
     "--trimL=0.75 --weakch=2 --edge=0.8"            # one weak sensor
     "--trim=0.80 --edge=0.8"                        # right motor the weak one instead
+    "--trimL=0.75 --real"                           # motors with lag, coast, scrub, battery sag
+    "--trimL=0.75 --real --tau=150 --pivot=1.5 --scrub=0.35 --sag=0.15"   # ... all of it worse
   )
 fi
 
 TMP=$(mktemp -d)
-printf "%-58s %-10s %-10s\n" "condition" "no-cal" "cal+mission"
+PC="${PATHCHECK:-0}"
+if [ "$PC" = "1" ]; then
+  printf "%-58s %-10s %-10s %s\n" "condition" "no-cal" "cal+mission" "path"
+else
+  printf "%-58s %-10s %-10s\n" "condition" "no-cal" "cal+mission"
+fi
 for c in "${CONDS[@]}"; do
   a=$(./sim/sim_e33.exe --quiet --startx=0 $c 2>/dev/null | sed -n 's/^score \([0-9]\)\/3$/\1/p')
   ee="$TMP/ee.bin"; rm -f "$ee"
@@ -40,7 +54,17 @@ for c in "${CONDS[@]}"; do
   if [ "${VERBOSE:-0}" = "1" ]; then
     ./sim/sim_e33.exe --serial --startx=0 --eeprom="$ee" $c 2>&1 | grep -v "^  bar"
   fi
-  b=$(./sim/sim_e33.exe --quiet --startx=0 --eeprom="$ee" $c 2>/dev/null | sed -n 's/^score \([0-9]\)\/3$/\1/p')
-  printf "%-58s %-10s %-10s\n" "${c:-(ideal)}" "${a:-0}/3" "${b:-0}/3"
+  if [ "$PC" = "1" ]; then
+    # the same run with a PATH line at every count (--path only prints)
+    out=$(./sim/sim_e33.exe --quiet --path --startx=0 --eeprom="$ee" $c 2>/dev/null)
+    b=$(printf '%s\n' "$out" | sed -n 's/^score \([0-9]\)\/3$/\1/p')
+    chk=$(printf '%s\n' "$out" | ${PYTHON:-python} sim/path_check.py --brief)
+    p=$(printf '%s\n' "$chk" | sed -n 's/^PATH CHECK \([A-Z]*\).*/\1/p')
+    printf "%-58s %-10s %-10s %s\n" "${c:-(ideal)}" "${a:-0}/3" "${b:-0}/3" "${p:-ERROR}"
+    [ "${p:-}" = "PASS" ] || printf '%s\n' "$chk" | grep "^  FAIL" | head -n 5
+  else
+    b=$(./sim/sim_e33.exe --quiet --startx=0 --eeprom="$ee" $c 2>/dev/null | sed -n 's/^score \([0-9]\)\/3$/\1/p')
+    printf "%-58s %-10s %-10s\n" "${c:-(ideal)}" "${a:-0}/3" "${b:-0}/3"
+  fi
 done
 rm -rf "$TMP"

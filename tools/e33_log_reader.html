@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E33 Log Reader</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#ffffff; --ink:#1b1f24; --muted:#5b6470; --line:#dde1e6;
+  --accent:#2457c5; --ok:#1d7a3e; --okbg:#e5f4ea; --warn:#8a5a00; --warnbg:#fdf1d6;
+  --bad:#b3261e; --badbg:#fbe4e2; --info:#34506e; --infobg:#e8eef6; --code:#f0f2f5;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15181c; --card:#1e2227; --ink:#e7eaee; --muted:#9aa4b0; --line:#343a42;
+    --accent:#7aa7ff; --ok:#6fd08f; --okbg:#18331f; --warn:#f0c060; --warnbg:#3a2e12;
+    --bad:#ff8a80; --badbg:#3d1c1a; --info:#a9c4e6; --infobg:#1d2a3a; --code:#262b31;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15181c; --card:#1e2227; --ink:#e7eaee; --muted:#9aa4b0; --line:#343a42;
+  --accent:#7aa7ff; --ok:#6fd08f; --okbg:#18331f; --warn:#f0c060; --warnbg:#3a2e12;
+  --bad:#ff8a80; --badbg:#3d1c1a; --info:#a9c4e6; --infobg:#1d2a3a; --code:#262b31;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:4px 0 2px}
+h2{font-size:1.08rem;margin:0 0 8px}
+h3{font-size:.95rem;margin:14px 0 6px;color:var(--muted)}
+p{margin:6px 0}
+.sub{color:var(--muted);margin:0 0 12px}
+textarea{width:100%;min-height:180px;resize:vertical;padding:10px;border:1px solid var(--line);border-radius:8px;
+  background:var(--card);color:var(--ink);font:12.5px/1.4 ui-monospace,Consolas,Menlo,monospace}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 16px;align-items:center}
+button{font:inherit;padding:7px 14px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button.main{background:var(--accent);border-color:var(--accent);color:#fff}
+#msg{color:var(--muted);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 14px}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;font-size:.93rem}
+.kv b{font-weight:600;color:var(--muted)}
+ul.diag{list-style:none;padding:0;margin:6px 0}
+ul.diag li{padding:6px 10px;border-radius:7px;margin:4px 0}
+.bad{background:var(--badbg);color:var(--bad)}
+.warn{background:var(--warnbg);color:var(--warn)}
+.ok{background:var(--okbg);color:var(--ok)}
+.info{background:var(--infobg);color:var(--info)}
+ul.diag li .src{font-size:.8rem;opacity:.8;margin-right:6px}
+.tw{overflow-x:auto;margin:6px 0}
+table{border-collapse:collapse;font-size:.86rem;min-width:100%}
+th,td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left;white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td.m{font-family:ui-monospace,Consolas,Menlo,monospace}
+td.bad,td.warn,td.ok{border-radius:0}
+tr.turn td{color:var(--muted)}
+tr.end td{font-weight:600}
+pre{background:var(--code);padding:8px;border-radius:7px;overflow-x:auto;font-size:.8rem;margin:6px 0}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.8rem;font-weight:600}
+details summary{cursor:pointer;color:var(--muted)}
+.none{color:var(--muted)}
+@media (max-width:560px){ body{font-size:14px} main{padding:12px 16px} .kv{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<main>
+<h1>E33 log reader</h1>
+<p class="sub">Paste everything the Serial Monitor printed (115200 baud). Timestamps, several runs and cut-off pastes are fine. Nothing leaves this page.</p>
+<textarea id="in" spellcheck="false" placeholder="Paste the Serial Monitor output here (Ctrl+A, Ctrl+C in the Serial Monitor, then Ctrl+V here)"></textarea>
+<div class="bar">
+  <button class="main" id="go">Read it</button>
+  <button id="copy">Copy summary</button>
+  <button id="clear">Clear</button>
+  <span id="msg"></span>
+</div>
+<div id="out"></div>
+</main>
+
+<script id="core">
+/* E33 log reader: parse and analyse what robot_e33_v2 prints on Serial.
+   The formats follow runLog.h logPrint, controlLibrary.h traceEvent, traceTurn,
+   fault, printCalSource, printResetCause and beginFnc, the ino's startMission and
+   finishMission, checkModes.h (sensor report, gripper check) and
+   calibrationMode.h (calibration report). No browser code in this script, so
+   node can load it for the tests. */
+(function(root){
+'use strict';
+
+var FAULTS = {
+  1:['line lost and not found again','sensor height, lighting, SENS_ON_PCT'],
+  2:['on a "crossing" for more than 1 s (driving along a line), or the whole bar sees black for too long','the turn before it; sensor levels'],
+  3:['half crossing: on the wrong line','the 180 before it'],
+  4:['a turn or an end was missed','CELL_CM, ROW_CM, battery'],
+  5:['no line after a MID crossing','the count is off'],
+  6:['a turn never found its line','dead band, battery, TURN_SP'],
+  7:['no line under the bar after a turn','turn speed, calibration'],
+  8:['no line ahead where a MID crossing should be','the count is off'],
+  9:['no column end found, even at the next crossing','ROW_CM, the count'],
+  10:['a 90 degree turn passed a line first','turn speed too high'],
+  11:['a 180 took far too long or too short','calibration'],
+  12:['no crossing for far too long: the wheels are not really turning','motor switch, battery, only USB power']
+};
+var CALSTOP = {
+  deadband:['a wheel did not move by duty 220, or moved the wrong way','MODE_MOTOR_CHECK; motor switch, battery, STBY wire; LEFT_REVERSED / RIGHT_REVERSED'],
+  sensors:['the sweep lost the line, or 3 or more sensors barely see it','MODE_SENSOR_CHECK; bar height'],
+  move:['line lost, a crossing at the wrong distance, or more than 20 s','place it again: wheels over C1, on MID, facing east; check CELL_CM'],
+  turn:['a spin did not see the lines, or no line under the bar after it','fresh battery; TURN_SP'],
+  cruise:['line lost, stuck on a crossing, a crossing at the wrong distance','fresh battery; CELL_CM']
+};
+function calStopKey(p){
+  p = (p || '').toLowerCase();
+  if(/dead ?band/.test(p)) return 'deadband';
+  if(/sensor/.test(p)) return 'sensors';
+  if(/leg 1|move/.test(p)) return 'move';
+  if(/leg [234]|cruise|trim/.test(p)) return 'cruise';
+  if(/turn|spin/.test(p)) return 'turn';
+  return '';
+}
+
+/* fixed instruction lines: recognised, nothing to analyse */
+var KNOWN = [
+  'Not driving. Fresh battery, robot at the start, then press reset.',
+  '(the LED on D13 blinks the fault number)',
+  'Put the robot at the start: wheels over C1, on MID, facing east. Then step back.',
+  'Line seen. Starting in 3 s: hands off.',
+  'Lifted. Now put it down at the start.',
+  'To calibrate again: lift the robot, then put it at the start.',
+  '(anything not PASS or WEAK: the mission uses the default for it)',
+  '(not finished: do not paste these)',
+  'To freeze these values: paste over CAL VALUES in calibration.h, set CAL_USE_EEPROM 0',
+  'Four steps, then a report to copy and send (from BEGIN to END).',
+  'hand, wheels on the table (do not lift it: a lifted bar reads black), so the',
+  'line passes under EVERY sensor, A0 to A7 and back. It watches for 15 s.',
+  'sensors, from A0 to A7. Keep still.',
+  'measuring, keep still...',
+  'go: turn it left and right now',
+  'Press Enter to do the check again, or go on with the next step in README.md.',
+  'Type a letter and press Enter:',
+  'o open (GRIP_OPEN) r release (GRIP_RELEASE) c closed (GRIP_CLOSED)',
+  '+ gripper 1 degree tighter - gripper 1 degree looser',
+  'd arm down (ARM_DOWN) y carry (ARM_CARRY) h high (ARM_HIGH)',
+  'u arm 1 degree up j arm 1 degree down',
+  't test: pick up, hold 2 s, put down (as in the mission)',
+  'p print the angles and the sensor bar ? this list',
+  'Sensor bar: on white, note the numbers with p. Then d, y and t with the object in the',
+  'jaws: the numbers must stay near the white ones, or the arm looks like a line.',
+  'Finding GRIP_CLOSED: put the object in the jaws with a strip of paper between',
+  'one jaw and the object. Press + until the strip is held. That angle is where the',
+  'jaws touch. After closing, the mission opens GRIP_BACKOFF_DEG again to hold, so',
+  '(Several at once: +++++ and Enter = 5 degrees.)',
+  'Slide the robot over white, over the line, over a crossing.'
+];
+var KNOWN_RE = [
+  /^press Enter in the Serial Monitor when ready \(or wait \d+ s\)$/,
+  /^STEP \d of 4: /,
+  /^set GRIP_CLOSED \d+ degrees tighter/
+];
+
+var TS = /^\s*\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,3})?\s*->\s?/;
+var MASK = '([01]{8})';
+var RE = {
+  reset: /^reset cause: ?(.*)$/,
+  cal: /^CAL: (.*)$/,
+  logBegin: /^=== E33 RUN LOG BEGIN/,
+  logEnd: /^=== E33 RUN LOG END/,
+  rec: /^t=(-?\d+(?:\.\d+)?) n=(\d+) ?(.*)$/,
+  restartedHere: /^RESTARTED here/,
+  logFull: /^\(log full/,
+  notEnded: /^\(the run did not end/,
+  restartBig: /^RESTARTED IN THE MIDDLE OF A RUN/,
+  lastNotFinished: /^Last run did not finish/,
+  waiting: /^MISSION: waiting for the line/,
+  go: /^MISSION: go$/,
+  wait: new RegExp('^bar ' + MASK + ' raw((?: \\d+){8}) (.*)$'),
+  selfLevels: /^default levels miss the line; measured standing still: white (\d+), line (\d+)$/,
+  lightWarn: /^WARNING: not the light of the calibration/,
+  power: /^n=(\d+) (POWER .*)$/,
+  trace: new RegExp('^n=(\\d+) (.+?) d=(-?[\\d.]+)/(-?[\\d.]+) m=' + MASK + ' ahead=(\\S+) v=([\\d.]+)(.*)$'),
+  turn: /^turn(Left|Right)(90|180) (\d+) ms \(expected about (\d+)\), lines passed (\d+)(.*)$/,
+  fault: /^FAULT (\d+): (.*)$/,
+  faultAt: new RegExp('^at n=(\\d+) bar ' + MASK + ' d=(-?\\d+)/(-?\\d+)$'),
+  calRun: /^=== AUTOMATIC CALIBRATION ===$/,
+  calRep: /^=== CALIBRATION REPORT run #(\d+)(?: STOPPED during (.*))?$/,
+  calStopped: /^CALIBRATION STOPPED during (.*?): (.*)$/,
+  calItem: /^(sensors|deadband|trim|move|cruise|turn|spin) \[([^\]]+)\] ?(.*)$/,
+  calDefine: /^#define CAL_(\w+) (.*)$/,
+  calEnd: /^\/\* -+ end CAL VALUES -+ \*\/$/,
+  calDone: /^(Done\. Set ROBOT_MODE|NOT FINISHED: )/,
+  calSaved: /^saved in EEPROM at (\d+), (read back OK|READ BACK FAILED)/,
+  calStep: /^step (\d): (.*)$/,
+  calDuty: /^(left|right) (forward|backward) (starts at duty (\d+)|did NOT move by duty 220|moved the WRONG way)$/,
+  calT90: /^(left|right) 90 degrees = (\d+) ms$/,
+  calSpin: /^spin match: (.*)$/,
+  calCross: /^crossing (\d+) at ([\d.]+) x the expected distance$/,
+  calWait: /^waiting: raw A0\.\.A7: (.*)$/,
+  calMidWarn: /^WARNING: a MIDDLE sensor hardly sees the line/,
+  scStart: /^=== SENSOR CHECK/,
+  scSeen: new RegExp('^sensors that have seen the line so far: ' + MASK + '$'),
+  srBegin: /^=== E33 SENSOR REPORT BEGIN/,
+  srEnd: /^=== E33 SENSOR REPORT END/,
+  srHead: /^ch,white,/,
+  srRow: /^A(\d),(.*)$/,
+  gcStart: /^=== GRIPPER CHECK/,
+  gcLine: /^gripper (\d+) arm (\d+) \(jaws just touch here\? then GRIP_CLOSED (-?\d+), now (-?\d+)\)$/,
+  gcBar: /^bar A0\.\.A7:((?: \d+){8})$/,
+  gcUnknownKey: /^unknown key: /,
+  meter: /^SENSOR METER: /,
+  motor: /^MOTOR CHECK: /,
+  simLine: /^\[\s*[\d.]+s\] |^\.\.\. pose=/,
+  simResult: /^=+ RESULT =+$/
+};
+
+function num(s){ var v = parseFloat(s); return isNaN(v) ? null : v; }
+function kvs(s){
+  var o = {}, m, re = /([A-Za-z][\w-]*)=(\S+)/g;
+  while((m = re.exec(s))) o[m[1]] = m[2];
+  return o;
+}
+function maskSensors(m){
+  var r = [];
+  for(var i = 0; i < 8; i++) if(m.charAt(i) === '1') r.push('A' + i);
+  return r;
+}
+function oneEnd(m){ return !!m && m.length === 8 && ((m.charAt(0) === '1') !== (m.charAt(7) === '1')); }
+
+/* one run log record line ("t=1.4 n=1 CROSS d=16.4 ...") */
+function parseRecord(t, n, rest){
+  var r = { t: num(t), n: +n, raw: rest };
+  var w = rest.split(' ')[0] || '';
+  var kv = kvs(rest), known = {};
+  function take(k){ known[k] = 1; return kv[k]; }
+  if(w === 'START'){
+    r.type = 'START'; r.cal = num(take('cal')); r.light = num(take('light'));
+    var rn = /run#(\d+)/.exec(rest); r.run = rn ? +rn[1] : null;
+    r.route = take('route') || null;
+  }else if(/^(CROSS|REJECT|MISSED-ONE|END\()/.test(w)){
+    r.type = w === 'CROSS' ? 'CROSS' : /^REJECT/.test(w) ? 'REJECT' : /^MISSED/.test(w) ? 'CREDIT' : 'ENDLOST';
+    r.d = num(take('d')); r.exp = num(take('expected')); r.mask = take('mask') || '';
+    r.ahead = take('ahead') || ''; r.v = num(take('v'));
+  }else if(w === 'TURN'){
+    var tm = /^TURN (LEFT|RIGHT) (90|180)/.exec(rest);
+    r.type = 'TURN'; r.dir = tm ? tm[1] : '?'; r.deg = tm ? +tm[2] : 0;
+    r.ms = num(take('ms')); r.exp = num(take('expected'));
+    r.lines = num(take('lines-passed')); r.mask = take('end-mask') || '';
+  }else if(/^PICK|^PLACE/.test(w)){
+    r.type = /^PICK/.test(w) ? 'PICK' : 'PLACE'; r.last = w === 'PLACE(last)';
+    r.d = num(take('bar-past-line')); r.exp = num(take('target'));
+  }else if(/^RETRY/.test(w)){
+    r.type = 'RETRY'; r.d = num(take('d'));
+  }else if(w === 'FAULT'){
+    var fm = /^FAULT (\d+)/.exec(rest);
+    r.type = 'FAULT'; r.code = fm ? +fm[1] : null;
+    r.d = num(take('d')); r.exp = num(take('expected')); r.mask = take('bar') || '';
+  }else if(w === 'POWER'){
+    r.type = 'POWER'; r.what = rest.split(' ')[1]; r.rest = num(take('rest')); r.low = num(take('min') || take('lowest')); r.lowFlag = / LOW$/.test(rest);
+  }else if(w === 'DONE'){
+    r.type = 'DONE'; r.rejected = num(take('rejected')); r.credited = num(take('missed-counted'));
+    r.retries = num(take('retries'));
+    var sp = take('speed'); r.speed = sp ? num(sp.replace(/^x/, '')) : null;
+    r.battNote = /battery weaker/.test(rest);
+  }else{
+    r.type = 'UNKNOWN';
+  }
+  r.extra = {};
+  for(var k in kv) if(!known[k]) r.extra[k] = kv[k];
+  return r;
+}
+
+/* the live trace names (traceEvent) as run log types */
+function traceType(what){
+  if(what === 'pass' || /^turn90 /.test(what) || /^keep_item/.test(what) || /^place_item/.test(what)) return 'CROSS';
+  if(/^not counted/.test(what)) return 'REJECT';
+  if(/^a crossing was missed/.test(what)) return 'CREDIT';
+  if(/^END found/.test(what)) return 'ENDLOST';
+  if(/^RETRY/.test(what)) return 'RETRY';
+  if(what === 'missed') return 'MISSED';
+  if(what === 'half crossing') return 'HALF';
+  return 'TRACE';
+}
+
+function parse(text){
+  var lines = String(text == null ? '' : text).replace(/^﻿/, '').split(/\r\n|\r|\n/);
+  var R = { blocks: [], unknown: [], sim: 0, stamps: 0, total: 0, lines: lines.length };
+  var cur = null, boot = null, lastCalRun = null, lastSc = null;
+  function open(kind, no, extra){
+    var b = { kind: kind, line: no };
+    for(var k in extra) b[k] = extra[k];
+    R.blocks.push(b); cur = b; return b;
+  }
+  function closeOpen(){
+    if(cur && (cur.kind === 'runlog' || cur.kind === 'sensor' || cur.kind === 'calreport') && !cur.ended) cur.noEnd = true;
+  }
+  function needBoot(no){ if(!boot){ boot = { kind: 'boot', line: no, notes: [], implied: true }; R.blocks.push(boot); } return boot; }
+  function newLive(no, extra){
+    var b = open('live', no, { wait: [], recs: [], go: false, notes: [] });
+    for(var k in extra) b[k] = extra[k];
+    if(boot) boot.live = b;
+    return b;
+  }
+
+  /* the current block tries the line first */
+  function inBlock(t, no){
+    var m, b = cur;
+    if(!b) return false;
+    if(b.kind === 'runlog'){
+      if(RE.logEnd.test(t)){ b.ended = true; cur = b.parent || null; return true; }
+      if((m = RE.rec.exec(t))){ b.recs.push(parseRecord(m[1], m[2], m[3])); return true; }
+      if(RE.restartedHere.test(t)){ b.recs.push({ type: 'RESTART', t: null, n: null, raw: t }); b.restarted = true; return true; }
+      if(RE.logFull.test(t)){ b.full = true; return true; }
+      if(RE.notEnded.test(t)){ b.cut = true; return true; }
+      return false;
+    }
+    if(b.kind === 'live'){
+      if((m = RE.wait.exec(t))){ b.wait.push({ mask: m[1], raw: m[2].trim().split(' ').map(Number), msg: m[3] }); return true; }
+      if((m = RE.selfLevels.exec(t))){ b.selfLevels = { white: +m[1], line: +m[2] }; return true; }
+      if(RE.lightWarn.test(t)){ b.lightWarn = true; return true; }
+      if((m = RE.power.exec(t))){ b.recs.push(parseRecord(null, m[1], m[2])); return true; }
+      if(/^WARNING: low supply/.test(t)) return true;
+      if(RE.go.test(t)){ b.go = true; return true; }
+      if((m = RE.trace.exec(t))){
+        b.recs.push({ type: traceType(m[2]), what: m[2], t: null, n: +m[1], d: num(m[3]), exp: num(m[4]),
+                      mask: m[5], ahead: m[6], v: num(m[7]), extra: kvs(m[8] || '') });
+        return true;
+      }
+      if((m = RE.turn.exec(t))){
+        b.recs.push({ type: 'TURN', t: null, n: null, dir: m[1].toUpperCase(), deg: +m[2], ms: +m[3], exp: +m[4], lines: +m[5] });
+        return true;
+      }
+      if((m = RE.fault.exec(t))){ b.fault = { code: +m[1], why: m[2] }; b.recs.push({ type: 'FAULT', t: null, n: null, code: +m[1], why: m[2] }); return true; }
+      if((m = RE.faultAt.exec(t)) && b.fault){
+        var f = b.recs[b.recs.length - 1];
+        b.fault.n = f.n = +m[1]; b.fault.mask = f.mask = m[2]; b.fault.d = f.d = +m[3]; b.fault.exp = f.exp = +m[4];
+        return true;
+      }
+      return false;
+    }
+    if(b.kind === 'calrun'){
+      if((m = RE.calStep.exec(t))){ b.steps.push(t); return true; }
+      if((m = RE.calDuty.exec(t))){ b.duty.push({ side: m[1], dir: m[2], duty: m[4] ? +m[4] : null, text: m[3] }); return true; }
+      if((m = RE.calT90.exec(t))){ b.t90.push({ side: m[1], ms: +m[2] }); return true; }
+      if((m = RE.calSpin.exec(t))){ b.spin.push(m[1]); return true; }
+      if((m = RE.calCross.exec(t))){ b.cross.push({ k: +m[1], r: +m[2] }); return true; }
+      if((m = RE.calWait.exec(t))){ b.waits++; return true; }
+      if(RE.calMidWarn.test(t)){ b.midWarn = true; return true; }
+      if((m = RE.calStopped.exec(t))){ b.stopped = { phase: m[1], why: m[2] }; return true; }
+      return false;
+    }
+    if(b.kind === 'calreport'){
+      if((m = RE.calItem.exec(t))){ b.items.push({ name: m[1], status: m[2], text: m[3] }); return true; }
+      if((m = RE.calDefine.exec(t))){ b.defines.push(t); return true; }
+      if((m = RE.calSaved.exec(t))){ b.saved = m[2]; return true; }
+      if(RE.calEnd.test(t)){ b.defines.push(t); return true; }
+      if(RE.calDone.test(t)){ b.ended = true; b.finished = /^Done/.test(t); cur = null; return true; }
+      return false;
+    }
+    if(b.kind === 'sensorcheck'){
+      if((m = RE.scSeen.exec(t))){ b.seen = m[1]; b.seenCount++; return true; }
+      if(/^STEP (\d) of 4/.test(t)){ b.step = +/^STEP (\d)/.exec(t)[1]; return true; }
+      return false;
+    }
+    if(b.kind === 'sensor'){
+      if(RE.srEnd.test(t)){ b.ended = true; cur = null; return true; }
+      if(RE.srHead.test(t)){ b.cols = t.split(','); return true; }
+      if((m = RE.srRow.exec(t)) && b.cols){
+        var v = t.split(','), row = {};
+        for(var i = 0; i < b.cols.length; i++) row[b.cols[i]] = v[i];
+        row.ch = +m[1]; b.rows.push(row); return true;
+      }
+      if((m = /^levels in use now: (.*)$/.exec(t))){ b.levels = m[1]; return true; }
+      if((m = /^black reads (HIGH|LOW)$/.exec(t))){ b.black = m[1]; return true; }
+      if((m = /^weakest: A(\d) contrast (-?\d+)$/.exec(t))){ b.weakest = { ch: +m[1], c: +m[2] }; return true; }
+      if((m = /^A(\d) (looked black in step 1|reads the same on white and black)(.*)$/.exec(t))){ b.chNotes.push(t); return true; }
+      if((m = /^one threshold for all 8 \(like the slides' 800 \/ 500\): (.*)$/.exec(t))){ b.threshold = m[1]; return true; }
+      if((m = /^reading once vs twice differs by up to (-?\d+) counts$/.exec(t))){ b.adc = +m[1]; return true; }
+      if((m = /^step 2: every sensor saw the line: (.*)$/.exec(t))){ b.step2 = m[1]; return true; }
+      if((m = new RegExp('^step 3 \\(line in the middle\\) with the levels in use now: ' + MASK + ' ?(.*)$').exec(t))){ b.step3 = { mask: m[1], text: m[2] }; return true; }
+      if(/^sensor part of CAL VALUES/.test(t)){ return true; }
+      if(RE.calDefine.test(t)){ b.defines.push(t); return true; }
+      if(/^\(.*\)$/.test(t)){ b.notes.push(t.slice(1, -1)); return true; }
+      return false;
+    }
+    if(b.kind === 'gripper'){
+      if((m = RE.gcLine.exec(t))){ b.prints.push({ grip: +m[1], arm: +m[2], suggest: +m[3], now: +m[4], bar: null }); return true; }
+      if((m = RE.gcBar.exec(t))){
+        var bar = m[1].trim().split(' ').map(Number);
+        if(b.prints.length && !b.prints[b.prints.length - 1].bar) b.prints[b.prints.length - 1].bar = bar;
+        else b.prints.push({ bar: bar });
+        return true;
+      }
+      if(RE.gcUnknownKey.test(t)){ b.badKeys++; return true; }
+      return false;
+    }
+    if(b.kind === 'meter' || b.kind === 'motor'){ b.count++; return 'late'; }
+    if(b.kind === 'simresult'){ R.sim++; return true; }
+    return false;
+  }
+
+  /* lines that start something, wherever they come */
+  function starter(t, no){
+    var m;
+    if((m = RE.reset.exec(t))){ closeOpen(); boot = open('boot', no, { reset: m[1].trim(), notes: [] }); return true; }
+    if((m = RE.cal.exec(t))){ closeOpen(); var bb = needBoot(no); bb.cal = m[1]; if(!cur || cur.kind !== 'boot') cur = bb; return true; }
+    if(RE.logBegin.test(t)){
+      var par = (cur && cur.kind === 'live') ? cur : null;
+      closeOpen();
+      var lg = open('runlog', no, { recs: [], parent: par, thisRun: !!(par && par.go) });
+      if(par) par.log = lg;
+      return true;
+    }
+    if(RE.restartBig.test(t)){ closeOpen(); needBoot(no).restartedMidRun = true; cur = boot; return true; }
+    if(RE.lastNotFinished.test(t)){ closeOpen(); needBoot(no).lastNotFinished = true; cur = boot; return true; }
+    if(RE.waiting.test(t)){ closeOpen(); newLive(no); return true; }
+    if(RE.go.test(t)){ closeOpen(); newLive(no, { go: true, noWait: true }); return true; }
+    if(RE.calRun.test(t)){ closeOpen(); lastCalRun = open('calrun', no, { steps: [], duty: [], t90: [], spin: [], cross: [], waits: 0 }); return true; }
+    if((m = RE.calRep.exec(t))){
+      closeOpen();
+      var cr = open('calreport', no, { run: +m[1], stopped: m[2] || null, items: [], defines: [] });
+      if(lastCalRun && lastCalRun.stopped && !lastCalRun.report){ cr.stopWhy = lastCalRun.stopped.why; lastCalRun.report = cr; }
+      return true;
+    }
+    if(RE.scStart.test(t)){ closeOpen(); lastSc = open('sensorcheck', no, { seen: null, seenCount: 0, step: 0 }); return true; }
+    if(RE.srBegin.test(t)){ closeOpen(); var sr = open('sensor', no, { rows: [], notes: [], chNotes: [], defines: [], cols: null }); if(lastSc && !lastSc.report){ lastSc.report = sr; sr.check = lastSc; } return true; }
+    if(RE.gcStart.test(t)){ closeOpen(); open('gripper', no, { prints: [], badKeys: 0 }); return true; }
+    if(RE.meter.test(t)){ closeOpen(); open('meter', no, { count: 0 }); return true; }
+    if(RE.motor.test(t)){ closeOpen(); open('motor', no, { count: 0 }); return true; }
+    if(RE.simResult.test(t)){ closeOpen(); open('simresult', no, {}); R.sim++; return true; }
+    return false;
+  }
+
+  /* lines that belong to a block the paste did not show the start of */
+  function orphan(t, no){
+    var m;
+    if((m = RE.rec.exec(t))){ closeOpen(); var lg = open('runlog', no, { recs: [], noBegin: true }); lg.recs.push(parseRecord(m[1], m[2], m[3])); return true; }
+    if(RE.trace.test(t) || RE.turn.test(t) || RE.fault.test(t) || RE.power.test(t)){
+      closeOpen(); newLive(no, { go: true, noWait: true, noStart: true });
+      return inBlock(t, no);
+    }
+    if(RE.calItem.test(t) || RE.calDefine.test(t)){
+      closeOpen(); open('calreport', no, { run: null, stopped: null, items: [], defines: [], noBegin: true });
+      return inBlock(t, no);
+    }
+    if(RE.simLine.test(t)){ R.sim++; return true; }
+    return false;
+  }
+
+  for(var i = 0; i < lines.length; i++){
+    var s = lines[i], no = i + 1, m = TS.exec(s);
+    if(m){ s = s.slice(m[0].length); R.stamps++; }
+    var t = s.replace(/\s+/g, ' ').trim();
+    if(!t) continue;
+    R.total++;
+    var got = false;
+    var b = inBlock(t, no);
+    if(b === true) got = true;
+    else if(starter(t, no)) got = true;
+    else if(b === 'late') got = true;
+    else{
+      if(cur && (cur.kind === 'runlog' || cur.kind === 'sensor' || cur.kind === 'calreport')){
+        /* an unexpected line inside a block: the paste may be mixed; keep going */
+      }
+      if(orphan(t, no)) got = true;
+      else if(KNOWN.indexOf(t) >= 0 || KNOWN_RE.some(function(r){ return r.test(t); })) got = true;
+    }
+    if(!got) R.unknown.push({ no: no, text: t });
+  }
+  closeOpen();
+  return R;
+}
+
+/* analysis */
+function mean(a){ if(!a.length) return null; var s = 0; for(var i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
+function r1(x){ return x == null ? '?' : (Math.round(x * 10) / 10).toFixed(1); }
+function r2(x){ return x == null ? '?' : (Math.round(x * 100) / 100).toFixed(2); }
+function sgn(x){ return x > 0 ? '+' : ''; }
+
+function turnName(r){ return (r.dir === 'LEFT' ? 'left ' : r.dir === 'RIGHT' ? 'right ' : '') + r.deg; }
+
+/* recs: run log records or the live trace, in order */
+function analyseRun(recs, opts){
+  opts = opts || {};
+  var A = { diag: [], legs: { row: [], col: [] }, turns: {}, oneEnd: [], counts: {}, start: null, done: null, fault: null };
+  var c = A.counts;
+  ['CROSS','REJECT','CREDIT','ENDLOST','TURN','PICK','PLACE','RETRY','FAULT','DONE','UNKNOWN','RESTART','TRACE','MISSED','HALF','POWER']
+    .forEach(function(k){ c[k] = 0; });
+  var heading = null;
+  if(opts.live) heading = 0;
+  for(var i = 0; i < recs.length; i++){
+    var r = recs[i];
+    c[r.type] = (c[r.type] || 0) + 1;
+    if(r.type === 'START'){ A.start = r; heading = 0; }
+    if(r.type === 'DONE') A.done = r;
+    if(r.type === 'FAULT') A.fault = r;
+    if(r.type === 'TURN'){
+      if(heading != null) heading = (heading + (r.dir === 'LEFT' ? -r.deg : r.deg) + 720) % 360;
+      if(r.ms != null && r.exp){
+        r.ratio = r.ms / r.exp;
+        var k = turnName(r);
+        (A.turns[k] = A.turns[k] || []).push(r.ratio);
+      }
+    }
+    if(r.type === 'CROSS' && r.d != null && r.exp != null && r.exp > 3){
+      r.ratio = r.d / r.exp;
+      r.axis = heading == null ? null : (heading % 180 === 0 ? 'row' : 'col');
+      if(r.axis) A.legs[r.axis].push(r);
+      if(oneEnd(r.mask)){ r.oneEnd = true; A.oneEnd.push(r); }
+    }
+  }
+  A.last = recs.length ? recs[recs.length - 1] : null;
+  var tl = null;
+  for(var j = recs.length - 1; j >= 0; j -= 1) if(recs[j].t != null){ tl = recs[j].t; break; }
+  A.duration = tl;
+
+  /* legs along MID and along the columns */
+  var all = [];
+  ['row','col'].forEach(function(ax){
+    var L = A.legs[ax];
+    var diffs = L.map(function(r){ return r.d - r.exp; });
+    var g = { n: L.length, ratio: mean(L.map(function(r){ return r.ratio; })), diff: mean(diffs) };
+    g.same = L.length ? Math.max(diffs.filter(function(d){ return d > 0; }).length, diffs.filter(function(d){ return d < 0; }).length) / L.length : 0;
+    A.legs[ax + 'Stat'] = g;
+    all = all.concat(L);
+  });
+  var allR = mean(all.map(function(r){ return r.ratio; }));
+  A.ratioAll = allR;
+  var R_ = A.legs.rowStat, C_ = A.legs.colStat;
+  function D(level, text){ A.diag.push({ level: level, text: text }); }
+
+  if(allR != null && all.length >= 2 && (allR > 1.3 || allR < 0.77)){
+    D('bad', 'Every distance measured x' + r2(allR) + ' of what was expected. The distance is worked out from the speed, so the robot moved ' +
+      (allR > 1 ? 'much slower' : 'much faster') + ' than the speed it was calibrated at: ' +
+      (allR > 1 ? 'a weak battery, a motor not getting full power, or the calibration was done on another battery.' : 'calibrated on a weak battery or USB power: calibrate again on the battery you race with.'));
+  }else{
+    var cellNote = function(g, name, def, other){
+      if(!g || g.n < 2 || g.diff == null) return;
+      var rel = (other && other.n >= 2 && other.diff != null) ? g.diff - other.diff : g.diff;
+      if(Math.abs(g.diff) >= 1.5 && g.same >= 0.75 && Math.abs(rel) >= 1.2){
+        D('warn', name + ' legs measure ' + sgn(g.diff) + r1(g.diff) + ' cm against expected on average (' + g.n + ' legs, ratio ' + r2(g.ratio) + ')' +
+          (other && other.n >= 2 ? ', the other direction ' + sgn(other.diff) + r1(other.diff) + ' cm' : '') + '. ' +
+          def + ' is probably about ' + r1(Math.abs(rel)) + ' cm too ' + (rel > 0 ? 'small' : 'big') +
+          ': measure it on the field, centre of line to centre of line.');
+      }
+    };
+    cellNote(R_, 'MID (east-west)', 'CELL_CM', C_);
+    cellNote(C_, 'Column (north-south)', 'ROW_CM', R_);
+    if(R_.n >= 2 && C_.n >= 2 && Math.abs(R_.diff) >= 1.5 && Math.abs(C_.diff) >= 1.5 && R_.diff * C_.diff > 0 && Math.abs(R_.diff - C_.diff) < 1.2)
+      D('warn', 'Legs in both directions measure about ' + sgn(mean([R_.diff, C_.diff])) + r1(mean([R_.diff, C_.diff])) + ' cm off. The same error both ways points at the speed (battery, calibration "cruise") more than at CELL_CM or ROW_CM.');
+  }
+
+  /* turns */
+  Object.keys(A.turns).forEach(function(k){
+    var m = mean(A.turns[k]);
+    if(m > 1.35) D('warn', 'Turns ' + k + ' took x' + r2(m) + ' the expected time (' + plural(A.turns[k].length, 'turn') + '): slower than at calibration (battery, tyres slipping, TURN_SP).');
+    else if(m < 0.7) D('warn', 'Turns ' + k + ' took only x' + r2(m) + ' the expected time: faster than at calibration (calibrated on a weaker battery?).');
+  });
+  recs.forEach(function(r){
+    if(r.type === 'TURN' && r.deg === 90 && r.lines > 0) D('bad', 'A 90 degree turn (' + turnName(r) + ') passed ' + r.lines + ' line(s) before stopping: it turned too far.');
+  });
+  if(A.oneEnd.length)
+    D('warn', A.oneEnd.length + ' crossing(s) had only one end of the bar lit (' + A.oneEnd.map(function(r){ return 'n=' + r.n + ' ' + r.mask; }).join(', ') +
+      '). A real crossing lights both ends; one end means driving along the wrong line or off to one side. At the edge of the field only the field side has to light.');
+  if(c.REJECT) D('warn', c.REJECT + ' crossing(s) came far too early and were not counted (a double count avoided): check the bar height and the line edges.');
+  if(c.CREDIT) D('warn', c.CREDIT + ' crossing(s) were missed and counted anyway: the bar did not see a whole crossing (faint tape, speed, a sensor).');
+  if(c.RETRY) D('warn', c.RETRY + ' time(s) there was line ahead where the column should end: it went on to the next crossing.');
+
+  /* start: light and calibration */
+  if(A.start){
+    var s = A.start;
+    if(s.cal === 0) D('warn', 'This run used the DEFAULT values (cal=0): run MODE_CALIBRATE once.');
+    if(s.light != null && s.cal !== 0){
+      var L2 = Math.abs(s.light);
+      if(L2 >= 150) D('bad', 'light=' + s.light + ': the white under the bar at the start was far from the calibrated white. Calibrate in this light (sunlight, other lamps).');
+      else if(L2 >= 60) D('warn', 'light=' + s.light + ': the white at the start differed from the calibration. If it misbehaves here, calibrate in this light.');
+    }
+  }
+  if(A.done){
+    var d = A.done;
+    if(d.speed != null && d.speed < 0.8) D('bad', 'speed=x' + r2(d.speed) + ': slower than at calibration. The battery is weaker: fresh battery, or calibrate again.');
+    else if(d.speed != null && d.speed > 1.2) D('warn', 'speed=x' + r2(d.speed) + ': faster than at calibration (calibrated on a weaker battery?).');
+  }
+  if(A.fault && A.fault.code != null){
+    var F = FAULTS[A.fault.code];
+    D('bad', 'FAULT ' + A.fault.code + ': ' + (F ? F[0] + '. Look at: ' + F[1] + '.' : (A.fault.why || 'unknown fault number (newer firmware?)')));
+    if(A.fault.code === 12 || A.fault.code === 11 || A.fault.code === 4){
+      if(allR != null && allR > 1.3) D('info', 'The distances above are also far too long: this fits a robot moving much slower than calibrated (battery).');
+    }
+  }
+  /* the supply (POWER): VCC at rest and the lowest while the servos moved */
+  var P = recs.filter(function(r){ return r.type === 'POWER'; }), lo = null;
+  P.forEach(function(r){ var v = r.what === 'start' ? r.rest : r.low; if(v != null && (!lo || v < lo.v)) lo = { v: v, r: r }; });
+  A.power = P.length ? (lo ? 'lowest ' + r2(lo.v) + ' V (' + lo.r.what + ' n=' + lo.r.n + ')' : 'not measurable (?)') : null;
+  var fix = ' Fresh battery, 6 x AA or 2-cell Li-ion, 470-1000 uF across the servos.';
+  if(lo && lo.v < 4.5) D('bad', 'The supply (VCC) fell to ' + r2(lo.v) + ' V (' + lo.r.what + ' n=' + lo.r.n + '): weak battery (near 2.7 V the Nano restarts).' + fix);
+  else if(lo && P.some(function(r){ return r.low && r.rest - r.low >= 0.25 && r.what !== 'end'; })) D('warn', 'The supply dipped 0.25 V or more while the servos moved (lowest ' + r2(lo.v) + ' V): the battery is getting weak.');
+  recs.forEach(function(r, i){ var q = recs[i - 1]; if(r.type === 'RESTART' && q && (q.type === 'PICK' || q.type === 'PLACE')) D('bad', 'Restarted during the servo moves of that ' + q.type + ': a brown-out.' + fix); });
+  if(c.UNKNOWN) D('info', c.UNKNOWN + ' record(s) of a kind this page does not know (newer firmware?): shown as printed.');
+  return A;
+}
+
+/* how a printed run log ended */
+function runEnd(b, A){
+  if(b.noEnd && !A.done && !A.fault) return { level: 'warn', text: 'The paste stops before "=== E33 RUN LOG END ===": copy the whole block.' };
+  if(A.done) return { level: 'ok', text: 'Finished normally (DONE) at n=' + A.done.n + (A.duration != null ? ' after ' + r1(A.duration) + ' s' : '') + '.' };
+  if(A.fault) return { level: 'bad', text: 'Stopped with FAULT ' + A.fault.code + ' at n=' + A.fault.n + (A.fault.t != null ? ', t=' + r1(A.fault.t) + ' s' : '') + '.' };
+  if(b.restarted) return { level: 'bad', text: 'The Nano RESTARTED in the middle of the run: a brown-out (weak battery, servo current) or reset / USB.' };
+  if(b.cut) return { level: 'bad', text: 'The run did not end: the power was switched off or lost' + (A.last && A.last.n != null ? ' after n=' + A.last.n : '') + '.' };
+  if(b.full) return { level: 'warn', text: 'The log was full: later events were not kept.' };
+  return { level: 'warn', text: 'No end record (DONE or FAULT).' };
+}
+
+function liveEnd(b, A){
+  if(b.log && b.log.thisRun) return { level: 'info', text: 'The run log printed at the end of this run is shown in its own card.' };
+  if(A.fault) return { level: 'bad', text: 'Stopped with FAULT ' + A.fault.code + (A.fault.n != null ? ' at n=' + A.fault.n : '') + ': ' + (A.fault.why || '') };
+  if(!b.go) return { level: 'warn', text: 'It never started: ' + waitReason(b) };
+  return { level: 'info', text: 'The paste ends while it was driving (no DONE or FAULT after it).' };
+}
+function waitReason(b){
+  var w = b.wait[b.wait.length - 1];
+  if(!w) return 'no bar reading printed.';
+  if(/line OK/.test(w.msg)) return 'the bar saw the line (line OK), it should go after 1.5 s (5 s after an unfinished run).';
+  return 'the bar showed ' + w.mask + ' (' + w.msg + ').';
+}
+
+function analyseCal(b){
+  var D = [];
+  b.items.forEach(function(it){
+    if(/^FAIL/.test(it.status)) D.push({ level: 'bad', text: it.name + ' FAILED: the mission uses the default for it.' });
+    else if(it.status === 'default') D.push({ level: b.stopped ? 'info' : 'warn', text: it.name + ' not measured (default used).' });
+    else if(it.status === 'WEAK') D.push({ level: 'warn', text: it.name + ' WEAK: ' + it.text });
+  });
+  if(b.stopped){
+    var k = calStopKey(b.stopped), T = CALSTOP[k];
+    D.unshift({ level: 'bad', text: 'Calibration STOPPED during ' + b.stopped + (b.stopWhy ? ' (' + b.stopWhy + ')' : '') + '.' +
+      (T ? ' Why: ' + T[0] + '. What to do: ' + T[1] + '.' : '') + ' Do not paste these values.' });
+  }
+  if(b.saved === 'READ BACK FAILED') D.push({ level: 'bad', text: 'EEPROM read back FAILED: the saved calibration is not reliable.' });
+  if(b.noEnd) D.push({ level: 'warn', text: 'The report is cut off: copy from "=== CALIBRATION REPORT" down to "end CAL VALUES" and the line after it.' });
+  if(!D.length && b.items.length) D.push({ level: 'ok', text: 'Every item PASS or WEAK' + (b.finished ? ', finished and saved.' : '.') });
+  return D;
+}
+
+function analyseSensor(b){
+  var D = [], bad = [], weak = [];
+  b.rows.forEach(function(r){
+    var v = (r.verdict || '').toUpperCase();
+    if(v === 'DEAD') bad.push('A' + r.ch);
+    else if(v && v !== 'OK') weak.push('A' + r.ch + ' ' + v);
+  });
+  if(bad.length) D.push({ level: 'bad', text: bad.join(', ') + ' DEAD (contrast under 100): height, wiring, or a broken sensor.' });
+  if(weak.length) D.push({ level: 'warn', text: weak.join(', ') + ': check the height and that the sensor is clean.' });
+  b.chNotes.forEach(function(t){ D.push({ level: 'warn', text: t }); });
+  var defaults = /default/i.test(b.levels || '');
+  var no = b.rows.filter(function(r){ return /^NO$/i.test(r.sees_line_now || ''); }).map(function(r){ return 'A' + r.ch; });
+  if(no.length && !defaults) D.push({ level: 'bad', text: 'With the levels in use now ' + no.join(', ') + ' do NOT see the line: calibrate again.' });
+  if(b.step2 && !/^yes/.test(b.step2)){
+    var mm = /not ([01]{8})/.exec(b.step2);
+    D.push({ level: 'warn', text: 'Step 2: not every sensor saw the line' + (mm ? ' (missing ' + maskSensors(mm[1]).join(', ') + ')' : '') + ': a weak sensor, or step 2 too fast.' });
+  }
+  if(b.step3 && !/good/.test(b.step3.text)) D.push({ level: 'warn', text: 'Step 3: the line in the middle read ' + b.step3.mask + ' (expected 00011000).' });
+  if(b.threshold && /none works/.test(b.threshold)) D.push({ level: 'info', text: 'No single threshold works for all 8: per-sensor calibration (MODE_CALIBRATE) is needed.' });
+  if(b.noEnd) D.push({ level: 'warn', text: 'The report is cut off before "=== E33 SENSOR REPORT END ===".' });
+  if(!D.length && b.rows.length) D.push({ level: 'ok', text: 'All ' + b.rows.length + ' sensors OK.' });
+  return D;
+}
+
+function analyseGripper(b){
+  var D = [], P = b.prints.filter(function(p){ return p.grip != null; });
+  if(P.length){
+    var l = P[P.length - 1];
+    D.push({ level: 'info', text: 'Last position: gripper ' + l.grip + ', arm ' + l.arm + '. If the jaws just touch here, set GRIP_CLOSED ' + l.suggest + ' (now ' + l.now + ').' });
+  }
+  var B = b.prints.filter(function(p){ return p.bar; });
+  if(B.length){
+    var base = B[0].bar, worst = null;
+    var spread = Math.max.apply(null, base) - Math.min.apply(null, base);
+    if(spread > 300) D.push({ level: 'warn', text: 'The first bar reading already shows a line (' + base.join(' ') + '): do this check with the bar over plain white.' });
+    for(var i = 1; i < B.length; i++) for(var k = 0; k < 8; k++){
+      var dd = Math.abs(B[i].bar[k] - base[k]);
+      if(!worst || dd > worst.d) worst = { d: dd, ch: k, p: B[i], from: base[k], to: B[i].bar[k] };
+    }
+    if(worst && worst.d >= 150)
+      D.push({ level: 'bad', text: 'Sensor A' + worst.ch + ' moved from ' + worst.from + ' to ' + worst.to + ' (gripper ' + worst.p.grip + ', arm ' + worst.p.arm + '): the arm or the object is in front of the bar, or shines its light back. The robot can see a line that is not there.' });
+    else if(B.length > 1) D.push({ level: 'ok', text: 'The sensor bar stayed within ' + (worst ? worst.d : 0) + ' counts of the first reading in every position.' });
+    else D.push({ level: 'info', text: 'Only one reading: press d, y, h and t with the object in the jaws, on white, and paste again to check the bar.' });
+  }
+  if(b.badKeys) D.push({ level: 'info', text: b.badKeys + ' unknown key(s): use small letters.' });
+  return D;
+}
+
+function analyseBoot(b, mission){
+  var D = [];
+  if(/BROWN-OUT/.test(b.reset || '')) D.push({ level: 'bad', text: 'Reset cause BROWN-OUT: the supply dipped (weak battery, servo current).' });
+  if(b.restartedMidRun) D.push({ level: 'bad', text: 'RESTARTED IN THE MIDDLE OF A RUN: it will not drive. Fresh battery, robot at the start, then reset.' });
+  if(b.cal){
+    if(/^DEFAULTS/.test(b.cal)) D.push({ level: mission ? 'warn' : 'info', text: 'Never calibrated: the mission uses the default values.' });
+    var its = [], m, re = /(\w+)=(FAIL\(default used\)|default|WEAK)/g;
+    while((m = re.exec(b.cal))) its.push(m[1] + ' ' + m[2]);
+    if(its.length) D.push({ level: mission ? 'warn' : 'info', text: 'Calibration items not PASS: ' + its.join(', ') + '.' });
+  }
+  if(b.lastNotFinished) D.push({ level: 'info', text: 'The run before did not finish: 5 s start wait.' });
+  return D;
+}
+
+/* does this start-up go on into the mission (not a check or calibration mode)? */
+function bootLeadsToMission(R, b){
+  var i = R.blocks.indexOf(b) + 1;
+  for(; i < R.blocks.length && R.blocks[i].kind !== 'boot'; i++){
+    var k = R.blocks[i].kind;
+    if(k === 'live' || k === 'runlog') return true;
+    if(k === 'calrun' || k === 'calreport' || k === 'sensorcheck' || k === 'sensor' || k === 'gripper' || k === 'meter' || k === 'motor') return false;
+  }
+  return true;
+}
+function plural(n, w){ return n + ' ' + w + (n === 1 ? '' : 's'); }
+
+function analyse(R){
+  var seen = {};
+  R.blocks.forEach(function(b){
+    if(b.kind === 'runlog'){
+      b.A = analyseRun(b.recs);
+      b.endInfo = runEnd(b, b.A);
+      var key = b.recs.map(function(r){ return r.raw || r.type; }).join('|');
+      if(seen[key] && b.recs.length) b.same = seen[key]; else seen[key] = b;
+    }else if(b.kind === 'live'){
+      b.A = analyseRun(b.recs, { live: true });
+      if(b.selfLevels) b.A.diag.unshift({ level: 'info', text: 'The default levels missed the line; it measured white ' + b.selfLevels.white + ' and line ' + b.selfLevels.line + ' standing still.' });
+      if(b.lightWarn) b.A.diag.unshift({ level: 'warn', text: 'WARNING at the start: not the light of the calibration. Calibrate here.' });
+      if(b.log && b.log.thisRun) b.A.diag = [];
+      b.endInfo = liveEnd(b, b.A);
+    }
+    else if(b.kind === 'calreport') b.diag = analyseCal(b);
+    else if(b.kind === 'sensor') b.diag = analyseSensor(b);
+    else if(b.kind === 'gripper') b.diag = analyseGripper(b);
+    else if(b.kind === 'boot') b.diag = analyseBoot(b, bootLeadsToMission(R, b));
+    else if(b.kind === 'calrun'){
+      b.diag = [];
+      if(b.stopped) b.diag.push({ level: 'bad', text: 'CALIBRATION STOPPED during ' + b.stopped.phase + ': ' + b.stopped.why });
+      if(b.midWarn) b.diag.push({ level: 'warn', text: 'A middle sensor hardly sees the line: fix its height or wiring first.' });
+      b.cross.forEach(function(c){ if(c.r < 0.85 || c.r > 1.15) b.diag.push({ level: 'warn', text: 'Calibration crossing ' + c.k + ' at x' + c.r + ' the expected distance.' }); });
+      if(!b.report && !b.stopped && !R.blocks.some(function(x){ return x.kind === 'calreport' && x.line > b.line; }))
+        b.diag.push({ level: 'info', text: 'No calibration report in the paste: plug in USB after the run and copy "=== CALIBRATION REPORT" to "end CAL VALUES".' });
+    }
+    else if(b.kind === 'sensorcheck'){
+      b.diag = [];
+      if(!b.report) b.diag.push({ level: 'info', text: 'The sensor report (BEGIN ... END) is not in the paste' + (b.step ? ' (it got to step ' + b.step + ' of 4)' : '') + '.' });
+    }
+  });
+  return R;
+}
+
+function blockTitle(b){
+  switch(b.kind){
+    case 'boot': return 'Start-up';
+    case 'runlog': return b.thisRun ? 'Run log (this run, printed at the end)' : b.noBegin ? 'Run log (no BEGIN line in the paste)' : 'Run log (last run)';
+    case 'live': return b.noStart ? 'Live mission output (start not in the paste)' : 'Mission start and live trace';
+    case 'calrun': return 'Calibration run';
+    case 'calreport': return 'Calibration report' + (b.run != null ? ' run #' + b.run : '');
+    case 'sensorcheck': return 'Sensor check steps';
+    case 'sensor': return 'Sensor report';
+    case 'gripper': return 'Gripper check';
+    case 'meter': return 'Sensor meter (MODE_METER)';
+    case 'motor': return 'Motor check (MODE_MOTOR_CHECK)';
+    case 'simresult': return 'Simulator result';
+  }
+  return b.kind;
+}
+
+function allDiag(R){
+  var out = [];
+  R.blocks.forEach(function(b){
+    var d = b.diag || (b.A ? b.A.diag : []);
+    if(b.endInfo) out.push({ level: b.endInfo.level, text: b.endInfo.text, src: blockTitle(b) });
+    if(b.same) return;
+    (d || []).forEach(function(x){ out.push({ level: x.level, text: x.text, src: blockTitle(b) }); });
+  });
+  return out;
+}
+
+/* compact plain text for the helper */
+function summary(R){
+  var o = ['E33 log summary (' + R.total + ' lines' + (R.stamps ? ', timestamps removed' : '') + ')'];
+  R.blocks.forEach(function(b){
+    if(b.kind === 'simresult') return;
+    var head = '* ' + blockTitle(b) + ': ';
+    if(b.kind === 'boot'){
+      o.push(head + 'reset ' + (b.reset || '?') + '; CAL: ' + (b.cal || '?'));
+    }else if(b.kind === 'runlog'){
+      if(b.same){ o.push(head + 'same run as above'); return; }
+      var A = b.A, c = A.counts, s = A.start;
+      var line = head + b.endInfo.text;
+      if(s) line += ' START cal=' + s.cal + ' run#' + s.run + ' light=' + s.light + (s.route ? ' route=' + s.route : '') + '.';
+      line += ' Crossings ' + c.CROSS + ', turns ' + c.TURN + ', picks ' + c.PICK + ', places ' + c.PLACE + '.';
+      if(A.done) line += ' rejected=' + A.done.rejected + ' missed-counted=' + A.done.credited + ' retries=' + A.done.retries + ' speed=x' + r2(A.done.speed) + '.';
+      else if(c.REJECT || c.CREDIT || c.RETRY) line += ' rejected ' + c.REJECT + ', missed-counted ' + c.CREDIT + ', retries ' + c.RETRY + '.';
+      o.push(line);
+      o.push(legLine(A));
+    }else if(b.kind === 'live'){
+      var L = b.A.counts;
+      o.push(head + b.endInfo.text + (b.recs.length ? ' Trace: ' + L.CROSS + ' crossings, ' + L.TURN + ' turns.' : ''));
+      if(!(b.log && b.log.thisRun) && b.recs.length) o.push(legLine(b.A));
+    }else if(b.kind === 'calreport'){
+      o.push(head + (b.stopped ? 'STOPPED during ' + b.stopped : b.finished ? 'finished' : 'not finished') + '; ' +
+        b.items.map(function(i){ return i.name + '=' + i.status; }).join(' ') + (b.saved ? '; EEPROM ' + b.saved : ''));
+      b.items.forEach(function(i){ if(i.name === 'trim' || i.name === 'turn' || i.name === 'deadband') o.push('    ' + i.name + ': ' + i.text); });
+    }else if(b.kind === 'sensor'){
+      o.push(head + (b.levels || '') + '; ' + b.rows.map(function(r){ return 'A' + r.ch + ' ' + (r.verdict || '?') + ' ' + (r.white || '') + '/' + (r.black || ''); }).join(', ') +
+        (b.threshold ? '; one threshold: ' + b.threshold : '') + (b.step2 ? '; step 2: ' + b.step2 : ''));
+    }else if(b.kind === 'calrun'){
+      o.push(head + b.steps.length + ' steps' + (b.duty.length ? '; duty ' + b.duty.map(function(d){ return d.side + ' ' + d.dir + ' ' + (d.duty != null ? d.duty : d.text); }).join(', ') : '') +
+        (b.stopped ? '; STOPPED during ' + b.stopped.phase + ': ' + b.stopped.why : ''));
+    }else if(b.kind === 'gripper'){
+      o.push(head + b.prints.filter(function(p){ return p.grip != null; }).map(function(p){ return 'g' + p.grip + '/a' + p.arm + (p.bar ? ' [' + p.bar.join(' ') + ']' : ''); }).join('; '));
+    }else if(b.kind === 'sensorcheck'){
+      o.push(head + 'got to step ' + b.step + ' of 4' + (b.seen ? ', step 2 seen ' + b.seen : ''));
+    }else{
+      o.push(head + (b.count || 0) + ' lines, not analysed');
+    }
+  });
+  var seenD = {};
+  var D = allDiag(R).filter(function(d){
+    if((d.level !== 'bad' && d.level !== 'warn') || seenD[d.text]) return false;
+    return (seenD[d.text] = true);
+  });
+  if(D.length){
+    o.push('Problems:');
+    D.forEach(function(d){ o.push('  [' + (d.level === 'bad' ? 'BAD' : 'check') + '] ' + d.text); });
+  }
+  if(R.unknown.length) o.push('Not recognised: ' + R.unknown.length + ' line(s), e.g. "' + R.unknown[0].text.slice(0, 60) + '"');
+  if(R.sim) o.push('Simulator lines ignored: ' + R.sim);
+  if(!R.blocks.length) o.push('Nothing from the E33 firmware was recognised.');
+  return o.join('\n');
+}
+function legLine(A){
+  var R_ = A.legs.rowStat, C_ = A.legs.colStat, t = [];
+  if(R_ && R_.n) t.push('MID legs ' + R_.n + ' ratio ' + r2(R_.ratio) + ' (' + sgn(R_.diff) + r1(R_.diff) + ' cm)');
+  if(C_ && C_.n) t.push('column legs ' + C_.n + ' ratio ' + r2(C_.ratio) + ' (' + sgn(C_.diff) + r1(C_.diff) + ' cm)');
+  var k = Object.keys(A.turns).map(function(n){ return n + ' x' + r2(mean(A.turns[n])); });
+  if(k.length) t.push('turn time/expected ' + k.join(', '));
+  return '    ' + (t.length ? t.join('; ') : 'no legs to compare');
+}
+
+var E33 = { parse: parse, analyse: analyse, read: function(t){ return analyse(parse(t)); }, summary: summary,
+            allDiag: allDiag, blockTitle: blockTitle, FAULTS: FAULTS, CALSTOP: CALSTOP, calStopKey: calStopKey,
+            maskSensors: maskSensors, mean: mean, r1: r1, r2: r2, turnName: turnName };
+if(typeof module !== 'undefined' && module.exports) module.exports = E33;
+else root.E33 = E33;
+})(this);
+</script>
+
+<script>
+(function(){
+'use strict';
+var $ = function(id){ return document.getElementById(id); };
+var last = null;
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function diagList(D){
+  if(!D || !D.length) return '';
+  var order = { bad: 0, warn: 1, info: 2, ok: 3 };
+  return '<ul class="diag">' + D.slice().sort(function(a, b){ return order[a.level] - order[b.level]; }).map(function(d){
+    return '<li class="' + d.level + '">' + (d.src ? '<span class="src">' + esc(d.src) + '</span>' : '') + esc(d.text) + '</li>';
+  }).join('') + '</ul>';
+}
+function kv(rows){ return '<div class="kv">' + rows.filter(function(r){ return r[1] != null && r[1] !== ''; }).map(function(r){ return '<b>' + esc(r[0]) + '</b><span>' + r[1] + '</span>'; }).join('') + '</div>'; }
+function table(head, rows){
+  return '<div class="tw"><table><thead><tr>' + head.map(function(h){ return '<th>' + esc(h) + '</th>'; }).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+}
+function cls(ratio, lo, hi){ if(ratio == null) return ''; return (ratio < lo || ratio > hi) ? 'warn' : ''; }
+var r1 = E33.r1, r2 = E33.r2;
+var EV = { START: 'start', CROSS: 'crossing', REJECT: 'not counted: too early', CREDIT: 'missed one: counted it',
+  ENDLOST: 'end found (line ran out)', RETRY: 'line ahead at an end: retry', DONE: 'DONE', RESTART: 'RESTARTED here',
+  MISSED: 'missed', HALF: 'half crossing', TRACE: 'trace' };
+
+function recRow(r){
+  var ev, meas = '', ratio = '', rc = '', mask = r.mask || '', mc = '', ahead = r.ahead || '', v = r.v != null ? r2(r.v) : '', tr = '';
+  if(r.type === 'TURN'){
+    ev = 'turn ' + E33.turnName(r).toLowerCase(); tr = 'turn';
+    meas = (r.ms != null ? r.ms : '?') + ' / ' + (r.exp != null ? r.exp : '?') + ' ms';
+    if(r.ratio != null){ ratio = r2(r.ratio); rc = cls(r.ratio, 0.75, 1.33); }
+    ahead = 'lines passed ' + (r.lines != null ? r.lines : '?');
+    if(r.deg === 90 && r.lines > 0) rc = 'bad';
+  }else if(r.type === 'FAULT'){
+    var F = E33.FAULTS[r.code];
+    ev = 'FAULT ' + r.code + ': ' + (F ? F[0] : (r.why || '')); tr = 'end';
+    if(r.d != null) meas = r1(r.d) + ' / ' + r1(r.exp) + ' cm';
+  }else if(r.type === 'PICK' || r.type === 'PLACE'){
+    ev = r.type === 'PICK' ? 'pick' : r.last ? 'place (last)' : 'place';
+    meas = 'bar past line ' + r1(r.d) + ' / ' + r1(r.exp) + ' cm';
+  }else if(r.type === 'POWER'){
+    ev = 'supply ' + r.what; if(r.lowFlag){ ratio = 'LOW'; rc = 'bad'; }
+    meas = 'rest ' + r2(r.rest) + (r.what === 'start' ? '' : ', min ' + r2(r.low)) + ' V';
+  }else if(r.type === 'START'){
+    ev = 'START cal=' + r.cal + ' run#' + r.run + ' light=' + r.light + (r.route ? ' route=' + r.route : '');
+  }else if(r.type === 'DONE'){
+    ev = 'DONE rejected=' + r.rejected + ' missed-counted=' + r.credited + ' retries=' + r.retries; tr = 'end';
+    meas = 'speed x' + r2(r.speed); if(r.speed != null && r.speed < 0.8) rc = 'bad';
+  }else if(r.type === 'UNKNOWN'){
+    ev = r.raw;
+  }else{
+    ev = r.what || EV[r.type] || r.type;
+    if(r.type === 'RESTART') tr = 'end';
+    if(r.d != null) meas = r1(r.d) + (r.exp != null ? ' / ' + r1(r.exp) : '') + ' cm';
+    if(r.ratio != null){ ratio = r2(r.ratio); rc = cls(r.ratio, 0.85, 1.15); }
+    if(r.axis) ev += r.axis === 'row' ? ' (MID)' : ' (column)';
+    if(r.oneEnd) mc = 'warn';
+    if(r.type === 'REJECT' || r.type === 'CREDIT' || r.type === 'MISSED' || r.type === 'HALF') tr = 'end';
+  }
+  var ex = r.extra ? Object.keys(r.extra).map(function(k){ return k + '=' + r.extra[k]; }).join(' ') : '';
+  if(ex) ev += ' [' + ex + ']';
+  return '<tr class="' + tr + '"><td class="num">' + (r.t != null ? r1(r.t) : '') + '</td><td class="num">' + (r.n != null ? r.n : '') + '</td><td>' + esc(ev) +
+    '</td><td class="num">' + esc(meas) + '</td><td class="num ' + rc + '">' + ratio + '</td><td class="m ' + mc + '">' + esc(mask) + '</td><td>' + esc(ahead) + '</td><td class="num">' + v + '</td></tr>';
+}
+function legTable(A){
+  var rows = [];
+  [['row', 'MID (east-west)'], ['col', 'columns (north-south)']].forEach(function(x){
+    var g = A.legs[x[0] + 'Stat'];
+    if(g && g.n) rows.push('<tr><td>' + x[1] + '</td><td class="num">' + g.n + '</td><td class="num">' + r2(g.ratio) + '</td><td class="num">' + (g.diff > 0 ? '+' : '') + r1(g.diff) + ' cm</td></tr>');
+  });
+  Object.keys(A.turns).forEach(function(k){
+    var m = E33.mean(A.turns[k]);
+    rows.push('<tr><td>turns ' + k + '</td><td class="num">' + A.turns[k].length + '</td><td class="num ' + cls(m, 0.75, 1.33) + '">' + r2(m) + '</td><td></td></tr>');
+  });
+  return rows.length ? '<h3>Measured against expected</h3>' + table(['what', 'count', 'mean ratio', 'mean difference'], rows) : '';
+}
+function recTable(recs){
+  if(!recs.length) return '<p class="none">No events.</p>';
+  return '<h3>Timeline</h3>' + table(['t (s)', 'n', 'event', 'measured / expected', 'ratio', 'bar A0..A7', 'ahead', 'v'], recs.map(recRow));
+}
+
+function card(b){
+  var h = '<section class="card"><h2>' + esc(E33.blockTitle(b)) + ' <span class="none" style="font-weight:400;font-size:.8rem">from line ' + b.line + '</span></h2>';
+  if(b.kind === 'boot'){
+    h += kv([['reset cause', esc(b.reset || '(not in the paste)')], ['calibration', esc(b.cal || '')]]);
+    h += diagList(b.diag);
+  }else if(b.kind === 'runlog'){
+    if(b.same){ h += '<p class="none">The same run as the run log from line ' + b.same.line + '.</p></section>'; return h; }
+    var A = b.A, s = A.start, c = A.counts;
+    h += diagList([b.endInfo]);
+    h += kv([
+      ['start', s ? esc('cal=' + s.cal + ' (' + (['defaults', 'EEPROM calibration', 'values in calibration.h'][s.cal] || '?') + '), run#' + s.run) : 'not in the log'],
+      ['route', s && s.route ? esc(s.route) : ''],
+      ['light', s ? esc(s.light + (s.light != null && Math.abs(s.light) < 60 ? ' (same light as the calibration)' : ' (white differs from the calibration)')) : ''],
+      ['supply', esc(A.power)],
+      ['speed', A.done ? esc('x' + r2(A.done.speed) + (A.done.speed < 0.8 ? ' (battery weaker than at calibration)' : ' (the battery is fine)')) : ''],
+      ['counts', esc(c.CROSS + ' crossings, ' + c.TURN + ' turns, ' + c.PICK + ' picks, ' + c.PLACE + ' places; rejected ' + (A.done ? A.done.rejected : c.REJECT) +
+        ', missed-counted ' + (A.done ? A.done.credited : c.CREDIT) + ', retries ' + (A.done ? A.done.retries : c.RETRY))],
+      ['time', A.duration != null ? r1(A.duration) + ' s' : '']
+    ]);
+    h += diagList(A.diag);
+    h += legTable(A) + recTable(b.recs);
+  }else if(b.kind === 'live'){
+    h += diagList([b.endInfo]);
+    if(b.wait.length){
+      var w = b.wait[b.wait.length - 1];
+      h += kv([['waiting', esc(b.wait.length + ' bar reading(s); last ' + w.mask + ' raw ' + w.raw.join(' ') + ' : ' + w.msg)]]);
+    }
+    if(b.log && b.log.thisRun){ h += '<p class="none">Live trace: ' + b.recs.length + ' lines (the run log card has the same run, with times).</p>'; }
+    else if(b.recs.length){ h += diagList(b.A.diag) + legTable(b.A) + recTable(b.recs); }
+    else h += diagList(b.A.diag);
+  }else if(b.kind === 'calreport'){
+    h += diagList(b.diag);
+    h += table(['item', 'status', 'details'], b.items.map(function(i){
+      var c2 = /^PASS/.test(i.status) ? 'ok' : /^WEAK/.test(i.status) ? 'warn' : /^FAIL/.test(i.status) ? 'bad' : '';
+      return '<tr><td>' + esc(i.name) + '</td><td class="' + c2 + '">' + esc(i.status) + '</td><td>' + esc(i.text) + '</td></tr>';
+    }));
+    if(b.saved) h += kv([['EEPROM', esc(b.saved)]]);
+    if(b.defines.length) h += '<details><summary>CAL VALUES (' + b.defines.length + ' lines)</summary><pre>' + esc(b.defines.join('\n')) + '</pre></details>';
+  }else if(b.kind === 'calrun'){
+    h += diagList(b.diag);
+    var rows = b.steps.map(function(s){ return '<tr><td>' + esc(s) + '</td></tr>'; })
+      .concat(b.duty.map(function(d){ return '<tr><td>' + esc(d.side + ' ' + d.dir + ': ' + d.text) + '</td></tr>'; }))
+      .concat(b.t90.map(function(d){ return '<tr><td>' + esc(d.side + ' 90 degrees = ' + d.ms + ' ms') + '</td></tr>'; }))
+      .concat(b.spin.map(function(s){ return '<tr><td>' + esc('spin match: ' + s) + '</td></tr>'; }));
+    if(rows.length) h += table(['progress'], rows);
+  }else if(b.kind === 'sensor'){
+    h += diagList(b.diag);
+    h += kv([['levels in use', esc(b.levels)], ['black reads', esc(b.black)], ['weakest', b.weakest ? esc('A' + b.weakest.ch + ', contrast ' + b.weakest.c) : ''],
+      ['one threshold', esc(b.threshold)], ['read once vs twice', b.adc != null ? esc(b.adc + ' counts') : ''], ['step 2', esc(b.step2)],
+      ['step 3', b.step3 ? esc(b.step3.mask + ' ' + b.step3.text) : '']]);
+    b.notes.forEach(function(n){ h += '<p class="none">' + esc(n) + '</p>'; });
+    if(b.cols){
+      var cols = b.cols;
+      h += table(cols, b.rows.map(function(r){
+        return '<tr>' + cols.map(function(k){
+          var v = k === 'ch' ? 'A' + r.ch : r[k], c3 = '';
+          if(k === 'verdict') c3 = v === 'OK' ? 'ok' : v === 'DEAD' ? 'bad' : 'warn';
+          if(k === 'sees_line_now' && v === 'NO') c3 = 'warn';
+          return '<td class="' + (k === 'ch' || k === 'verdict' || k === 'sees_line_now' ? '' : 'num ') + c3 + '">' + esc(v) + '</td>';
+        }).join('') + '</tr>';
+      }));
+    }
+    if(b.defines.length) h += '<details><summary>sensor CAL VALUES</summary><pre>' + esc(b.defines.join('\n')) + '</pre></details>';
+  }else if(b.kind === 'sensorcheck'){
+    h += kv([['last step', b.step ? b.step + ' of 4' : ''], ['step 2 seen so far', b.seen ? esc(b.seen) : '']]);
+    h += diagList(b.diag);
+  }else if(b.kind === 'gripper'){
+    h += diagList(b.diag);
+    h += table(['gripper', 'arm', 'GRIP_CLOSED if the jaws touch', 'bar A0..A7'], b.prints.map(function(p){
+      return '<tr><td class="num">' + (p.grip != null ? p.grip : '') + '</td><td class="num">' + (p.arm != null ? p.arm : '') + '</td><td class="num">' + (p.suggest != null ? p.suggest : '') +
+        '</td><td class="m">' + (p.bar ? p.bar.join(' ') : '') + '</td></tr>';
+    }));
+  }else{
+    h += '<p class="none">' + (b.count || 0) + ' more line(s), shown as printed; this page does not analyse this mode.</p>';
+  }
+  return h + '</section>';
+}
+
+function run(){
+  var text = $('in').value;
+  if(!text.trim()){ $('out').innerHTML = ''; $('msg').textContent = ''; last = null; return; }
+  var R = E33.read(text); last = R;
+  var h = '<section class="card"><h2>Diagnosis</h2>';
+  var D = E33.allDiag(R).filter(function(d){ return d.level !== 'info' || /paste|not in the paste|cut off/.test(d.text); });
+  h += D.length ? diagList(D) : '<p class="none">Nothing to report.</p>';
+  h += '<p class="none">' + R.total + ' lines read' + (R.stamps ? ', ' + R.stamps + ' timestamps removed' : '') + ', ' + R.blocks.length + ' block(s) found' +
+       (R.sim ? ', ' + R.sim + ' simulator lines ignored' : '') + '.</p>';
+  if(!R.blocks.length) h += '<p class="bad" style="padding:6px 10px;border-radius:7px">Nothing from the E33 firmware was recognised. Is the baud rate 115200, and is this the Serial Monitor output?</p>';
+  h += '</section>';
+  R.blocks.forEach(function(b){ if(b.kind !== 'simresult') h += card(b); });
+  if(R.unknown.length){
+    h += '<section class="card"><h2>Not recognised (' + R.unknown.length + ' line' + (R.unknown.length > 1 ? 's' : '') + ')</h2>' +
+      '<p class="none">These lines are not in a format this page knows. They may be garbled (wrong baud rate), from other code, or from a newer firmware.</p>' +
+      '<pre>' + esc(R.unknown.slice(0, 60).map(function(u){ return u.no + ': ' + u.text; }).join('\n')) + (R.unknown.length > 60 ? '\n...' : '') + '</pre></section>';
+  }
+  $('out').innerHTML = h;
+  $('msg').textContent = R.blocks.length + ' block(s) found';
+}
+var timer = null;
+$('in').addEventListener('input', function(){ clearTimeout(timer); timer = setTimeout(run, 300); });
+$('go').addEventListener('click', run);
+$('clear').addEventListener('click', function(){ $('in').value = ''; run(); $('in').focus(); });
+$('copy').addEventListener('click', function(){
+  if(!last) run();
+  if(!last){ $('msg').textContent = 'Paste something first.'; return; }
+  var s = E33.summary(last);
+  function fallback(){
+    var t = document.createElement('textarea'); t.value = s; document.body.appendChild(t); t.select();
+    var ok = false; try{ ok = document.execCommand('copy'); }catch(e){}
+    document.body.removeChild(t);
+    $('msg').textContent = ok ? 'Summary copied.' : 'Copy failed: select the summary below and copy it.';
+    if(!ok) $('out').insertAdjacentHTML('afterbegin', '<section class="card"><h2>Summary</h2><pre>' + esc(s) + '</pre></section>');
+  }
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(s).then(function(){ $('msg').textContent = 'Summary copied.'; }, fallback);
+  }else fallback();
+});
+})();
+</script>
+</body>
+</html>
