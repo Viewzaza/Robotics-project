@@ -5,37 +5,56 @@
  *  Everything that belongs to YOUR robot and YOUR field is here.
  *  The other files are the course library and should not need changes.
  *
- *  HOW TO USE IT (the same steps as "Getting it running" in README.md)
+ *  THIS SAME FILE IS IN BOTH PROGRAMS, e33_calibrate/ and e33_mission/,
+ *  and both must use the same numbers (sizes, speeds, servo angles). Edit
+ *  either copy, save, then double-click tools\copy_settings.bat (the tools
+ *  folder next to e33_mission): it copies the one you changed last over the
+ *  other. Do it after EVERY change, before the next upload.
+ *
+ *  HOW TO USE IT (the same steps as "Getting it running" in
+ *  e33_mission/README.md)
+ *  There are two programs:
+ *    e33_calibrate   the checks and the calibration: choose the STEP at the
+ *                    top of e33_calibrate.ino, upload, open the Serial Monitor
+ *    e33_mission     the real run: upload it, put the robot at the start
  *
  *   1. Measure the field and robot sizes below with a ruler
  *      (CELL_CM matters most).
  *
- *   2. The checks. For each one set ROBOT_MODE (below), upload, and open
- *      the Serial Monitor (115200 baud, "Newline"). Lift the robot or
- *      switch the motors off BEFORE you upload: the new mode starts at once.
+ *   2. The checks, with e33_calibrate, in this order. For each one set STEP
+ *      at the top of e33_calibrate.ino, upload, and open the Serial Monitor
+ *      (115200 baud, "New Line"). Lift the robot off the field BEFORE you
+ *      upload: the new program starts at once.
+ *        MODE_SENSOR_CHECK   the robot never moves: every sensor OK (its
+ *                            report ends with the sensor part of the CAL
+ *                            VALUES; pasting it is not needed)
  *        MODE_GRIPPER_CHECK  the robot never drives: check GRIP_CLOSED
- *        MODE_SENSOR_CHECK   the robot never moves: every sensor OK
  *        MODE_MOTOR_CHECK    WHEELS OFF THE GROUND: each wheel turns the
  *                            right way (if not: LEFT_ / RIGHT_REVERSED)
  *
- *   3. Set ROBOT_MODE to MODE_CALIBRATE and upload.
+ *   3. e33_calibrate with STEP MODE_CALIBRATE: upload.
  *      Put a fresh battery in. Place the robot at the mission start:
  *      wheels (axle) over the C1 line, on the MID line, facing east.
  *      Switch on and step back. It waits until it sees the line, then
- *      calibrates itself for about 90 seconds and stops at the start.
- *      Nothing to press. Then plug in USB and read the report (README.md:
- *      "When the calibration stops" if it says STOPPED).
+ *      calibrates itself for about a minute and stops at the start.
+ *      Nothing to press. Then plug in USB and read the report
+ *      (e33_mission/README.md: "When the calibration stops" if it says
+ *      STOPPED).
  *
- *   3b. (Optional, after 3) MODE_TURN_CHECK: put the WHEELS (axle) on the
+ *   3b. (Optional, after 3) STEP MODE_TURN_CHECK: put the WHEELS (axle) on the
  *      C2 MID or C3 MID crossing, facing along MID. It turns left and right,
  *      90 and 180, 24 times on the spot with the saved calibration, then
  *      prints a report: copy it from BEGIN to END and send it.
  *
- *   4. Set ROBOT_MODE back to MODE_MISSION and upload. The mission loads
- *      the calibration from EEPROM automatically.
- *      (Optional: the calibration prints a block of #define lines. Paste
- *      it over the CAL VALUES section at the bottom of this file and set
- *      CAL_USE_EEPROM to 0 to freeze the values in the source code.)
+ *   4. Upload e33_mission. It loads the calibration from EEPROM
+ *      automatically, and goes as soon as the line is under the middle of
+ *      the bar. It never calibrates by itself.
+ *      (Optional: the calibration prints a block of #define lines. Select
+ *      the CAL VALUES block at the bottom of this file, from
+ *      #define CAL_VALUES_FROM_RUN down to "end CAL VALUES", paste the
+ *      printed block over it, set CAL_USE_EEPROM to 0 to freeze the values,
+ *      and run copy_settings. A new calibration is then IGNORED until you
+ *      set CAL_USE_EEPROM back to 1.)
  *
  *  Open the Serial Monitor at 115200 baud to see what the robot is doing.
  * ===================================================================== */
@@ -43,7 +62,9 @@
 #define CALIBRATION_H
 
 /* ------------------------------------------------------------ mode ----- */
-#define MODE_MISSION      0   /* run the e33 mission                         */
+/* [E33] Nothing to set here: MODE_MISSION is e33_mission, and the others
+ * are the STEPs of e33_calibrate (chosen at the top of e33_calibrate.ino). */
+#define MODE_MISSION      0   /* e33_mission: run the e33 mission            */
 #define MODE_CALIBRATE    1   /* measure sensors and motors, save to EEPROM   */
 #define MODE_METER        2   /* print the sensors live; the robot never moves */
 #define MODE_MOTOR_CHECK  3   /* wheels off the ground: test each motor        */
@@ -55,8 +76,10 @@
                               /* MID crossing, timed; the robot never drives  */
                               /* along a line                                 */
 
-#ifndef ROBOT_MODE                /* (the simulator can set it from outside) */
-#define ROBOT_MODE   MODE_MISSION   /* <- change the mode here */
+/* The program sets the mode: e33_mission is always the mission, and
+ * e33_calibrate takes it from STEP at the top of e33_calibrate.ino. */
+#ifndef ROBOT_MODE
+#define ROBOT_MODE   MODE_MISSION
 #endif
 
 #define CAL_USE_EEPROM    1   /* 1 = use the saved calibration if there is one
@@ -79,6 +102,13 @@
                                *       and 19 crossings instead of 25, but it
                                *       turns where it stands at the start, so
                                *       put the wheels exactly over C1         */
+#endif
+#ifndef START_WAIT_MS
+#define START_WAIT_MS   200   /* it goes once the line has been under the
+                               * middle of the bar this long (ms)             */
+#endif
+#ifndef START_WAIT_AFTER_STOP_MS
+#define START_WAIT_AFTER_STOP_MS 5000  /* ... after a run that did not finish */
 #endif
 #ifndef PRACTICE
 #define PRACTICE          0   /* 0 = the whole mission. 1 or 2 = stop after
@@ -161,20 +191,48 @@
 /* A sensor switches ON when its reading passes this percentage of the way
  * from white to black, and OFF again below the second number. These are
  * percentages of EACH channel's own contrast, so a weak channel still works.
- * Lower SENS_ON_PCT = more sensitive (sees fainter line, more noise). */
+ * Lower SENS_ON_PCT = more sensitive (sees fainter line, more noise).
+ * [E33] SENS_OFF_PCT was 30. Where the white of the field reads darker than
+ * at the calibration (a grey patch, a seam, a lamp or sunlight), a sensor
+ * that just left the line stayed on while that white was above 30%: a
+ * crossing that never ended (FAULT 2) or a turn that never saw the bar clear
+ * (FAULT 6 / 7). In the simulator with your sensors that began where a patch
+ * or a light change made the white read about 250 higher. At 38 the robot
+ * copes up to about 300 higher (the limit is then SENS_ON_PCT itself; see
+ * "Setting up the field" in the README). Do not set it closer to SENS_ON_PCT: the
+ * gap between the two is what stops a noisy sensor flickering at a line edge. */
 #define SENS_ON_PCT      45
-#define SENS_OFF_PCT     30
+#define SENS_OFF_PCT     38
+
+/* Which way black reads is CAL_LINE_LOW below, and the robot never guesses
+ * it: your bar reads black HIGH (about 970) and white LOW (about 70 to 200),
+ * so it is 0. (MODE_SENSOR_CHECK says which way yours reads.) */
+#ifndef CAL_SENSORS_MEASURED
+#define CAL_SENSORS_MEASURED  1   /* 1 = CAL_LO / CAL_HI below were measured on
+                                   * this robot, so the mission uses them as
+                                   * they are. 0 = guesses: it measures the
+                                   * levels itself, standing still, if the
+                                   * guesses do not see the line.            */
+#endif
 
 /* =====================================================================
  *  CAL VALUES
  *  Used when there is no calibration in EEPROM, or when CAL_USE_EEPROM is 0.
- *  The calibration prints a block in exactly this format: paste it here.
- *  The numbers below are safe starting guesses, not measurements.
+ *  The calibration prints a block in exactly this format: select from
+ *  #define CAL_VALUES_FROM_RUN down to "end CAL VALUES" and paste over it.
+ *  (Pasted above the old lines, the upload stops with "CAL VALUES twice".)
+ *  The sensor levels (CAL_LO, CAL_HI) were measured on your robot; the
+ *  motor and turn numbers are safe starting guesses, not measurements.
  * ===================================================================== */
+#if defined(CAL_VALUES_FROM_RUN) || defined(CAL_LINE_LOW) || defined(CAL_LO) || defined(CAL_HI)
+  #error "CAL VALUES twice in calibration.h: new lines were pasted ABOVE the old ones. Delete the old lines, or paste OVER them."
+#endif
 #define CAL_VALUES_FROM_RUN   0          /* 0 = never calibrated              */
 #define CAL_LINE_LOW          0          /* 1 = black reads LOW on your bar   */
-#define CAL_LO   { 250, 250, 250, 250, 250, 250, 250, 250 }  /* white readings */
-#define CAL_HI   { 750, 750, 750, 750, 750, 750, 750, 750 }  /* black readings */
+/* measured on your robot (Serial Monitor, 2026-09-29): white is the highest
+ * reading each sensor gave on white, black the lowest it gave on black */
+#define CAL_LO   { 203, 159,  74,  78,  72,  98,  99,  99 }  /* white readings */
+#define CAL_HI   { 970, 971, 964, 965, 966, 975, 971, 971 }  /* black readings */
 #define CAL_DEAD_MASK         0x00       /* channels too weak to use          */
 #define CAL_DB_LF            45          /* duty where each wheel starts:     */
 #define CAL_DB_LR            45          /*   left fwd, left rev,             */

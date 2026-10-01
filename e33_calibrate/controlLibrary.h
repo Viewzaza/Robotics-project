@@ -12,6 +12,10 @@
  *
  *  You should not need to edit this file. Your numbers are in calibration.h.
  * ===================================================================== */
+/* [E33] (older calibration.h files do not have it: then the levels are guesses) */
+#ifndef CAL_SENSORS_MEASURED
+#define CAL_SENSORS_MEASURED 0
+#endif
 #ifndef CONTROLLIBRARY_H
 #define CONTROLLIBRARY_H
 
@@ -30,6 +34,9 @@
   #endif
   #ifndef pgm_read_word
     #define pgm_read_word(p) (*(const uint16_t *)(p))
+  #endif
+  #ifndef pgm_read_byte
+    #define pgm_read_byte(p) (*(const uint8_t *)(p))
   #endif
 #endif
 
@@ -58,10 +65,11 @@ int sp = SP_START;
 int maxSp = MAX_SP;          /* [E33] slides: 255. You asked for a slower walk. */
 unsigned long tUpSp = 0;
 
-extern int numGride;          /* defined in robot_e33_v2.ino */
+extern int numGride;          /* defined in e33_mission.ino (and e33_calibrate.ino) */
 
 /* What the route expects at each count number. caseInfo(n) is written in
- * robot_e33_v2.ino, next to the switch, so the route is in one place. */
+ * e33_mission.ino, next to the switch, so the route is in one place
+ * (e33_calibrate.ino has one that says K_PASS: it has no route). */
 #define K_PASS  0             /* drive straight over it                 */
 #define K_TURN  1             /* turn90 on a MID crossing               */
 #define K_END   2             /* keep_item / place_item at a column end */
@@ -97,7 +105,8 @@ void traceEvent(const __FlashStringHelper *what);
 
 /* =====================================================================
  *  [E33]  CALIBRATION VALUES
- *  Loaded at start-up from EEPROM (written by the calibration mode), or
+ *  Loaded at start-up from EEPROM (written by e33_calibrate, STEP
+ *  MODE_CALIBRATE), or
  *  from the CAL VALUES block in calibration.h. Loading never moves the
  *  robot.
  * ===================================================================== */
@@ -155,6 +164,8 @@ uint16_t calSeq = 0;
 
 /* ([E33] noinline: one copy saves flash) */
 __attribute__((noinline)) uint8_t calItem(uint16_t st, uint8_t k){ return (st >> (2*k)) & 3; }
+/* [E33] the item passed or was weak: its values are used */
+__attribute__((noinline)) bool calUsed(uint16_t st, uint8_t k){ uint8_t s = calItem(st, k); return s == ST_PASS || s == ST_WEAK; }
 
 uint16_t fletcher16(const uint8_t *p, uint8_t n){
   uint16_t a = 0, b = 0;
@@ -179,6 +190,9 @@ const CalData calMacros PROGMEM = {
 
 void calFromMacros(){
   memcpy_P(&cal, &calMacros, sizeof(CalData));
+#ifdef SIM_GUESS_LEVELS                  /* (simulator tests of the guesses path) */
+  for(uint8_t i=0;i<8;i++){ cal.lo[i] = 250; cal.hi[i] = 750; }
+#endif
   /* the macros hold RAW readings; store them on the black-high scale */
   if(cal.lineLow){
     for(uint8_t i=0;i<8;i++){ cal.lo[i] = 1023 - cal.lo[i]; cal.hi[i] = 1023 - cal.hi[i]; }
@@ -219,36 +233,45 @@ int calReadEeprom(CalRec &out){
   return CAL_SLOT_B + 1;
 }
 
-void calLoad(){
+/* [E33] v * m / d without overflow (one copy of the 32-bit code saves flash) */
+__attribute__((noinline)) uint16_t mulDiv(uint16_t v, uint16_t m, uint16_t d){
+  return (uint16_t)((uint32_t)v * m / d);
+}
+
+/* ([E33] noinline: its record then has its own stack frame and the long
+ * start-up code around it stays small, which saves flash) */
+__attribute__((noinline)) void calLoad(){
   calFromMacros();
   calSource = CAL_VALUES_FROM_RUN ? 2 : 0;
   calStatus = 0;
 #if CAL_USE_EEPROM
   CalRec r;
   if(calReadEeprom(r)){
+    /* [E33] saved levels for the other polarity (black reading LOW when
+     * CAL_LINE_LOW says HIGH, or the other way): never use them */
+    if(r.d.lineLow != CAL_LINE_LOW) r.status = (r.status & ~3u) | ST_FAIL;   /* CI_SENSOR is item 0 */
     for(uint8_t k=0;k<CI_COUNT;k++){
-      uint8_t s = calItem(r.status, k);
-      if(s == ST_PASS || s == ST_WEAK) calCopyItem(cal, r.d, k);   /* pass or weak: use it */
+      if(calUsed(r.status, k)) calCopyItem(cal, r.d, k);   /* pass or weak: use it */
     }
+    bool mv = calUsed(r.status, CI_MOVE), cr = calUsed(r.status, CI_CRUISE);
     /* speeds were measured at the calibration's MAX_SP / MOVE_SP / TURN_SP.
      * If you have changed those since, scale them (the motor layer is close
-     * to linear). Recalibrate when you can. */
-    if(r.maxSp != MAX_SP && r.maxSp)
-      cal.vCruise100 = (uint16_t)((uint32_t)cal.vCruise100 * MAX_SP / r.maxSp);
-    if(r.moveSp != MOVE_SP && r.moveSp)
-      cal.vMove100 = (uint16_t)((uint32_t)cal.vMove100 * MOVE_SP / r.moveSp);
-    if(r.turnSp != TURN_SP && r.turnSp){
-      cal.t90L = (uint16_t)((uint32_t)cal.t90L * r.turnSp / TURN_SP);
-      cal.t90R = (uint16_t)((uint32_t)cal.t90R * r.turnSp / TURN_SP);
+     * to linear). Recalibrate when you can. [E33] Only a value taken from
+     * the EEPROM: a default from calibration.h is already for today's speeds. */
+    if(cr && r.maxSp != MAX_SP && r.maxSp)
+      cal.vCruise100 = mulDiv(cal.vCruise100, MAX_SP, r.maxSp);
+    if(mv && r.moveSp != MOVE_SP && r.moveSp)
+      cal.vMove100 = mulDiv(cal.vMove100, MOVE_SP, r.moveSp);
+    if(calUsed(r.status, CI_TURN) && r.turnSp != TURN_SP && r.turnSp){
+      cal.t90L = mulDiv(cal.t90L, r.turnSp, TURN_SP);
+      cal.t90R = mulDiv(cal.t90R, r.turnSp, TURN_SP);
     }
     /* [E33] one of the two speeds measured and the other not: derive it from
      * the measured one (the motor layer is close to linear) instead of mixing a
      * measurement with the guess; the mix can make the robot "faster" at
      * MOVE_SP than at MAX_SP and every move before a turn wrong */
-    bool mv = calItem(r.status, CI_MOVE) == ST_PASS || calItem(r.status, CI_MOVE) == ST_WEAK;
-    bool cr = calItem(r.status, CI_CRUISE) == ST_PASS || calItem(r.status, CI_CRUISE) == ST_WEAK;
-    if(mv && !cr) cal.vCruise100 = (uint16_t)((uint32_t)cal.vMove100 * MAX_SP / MOVE_SP);
-    if(cr && !mv) cal.vMove100   = (uint16_t)((uint32_t)cal.vCruise100 * MOVE_SP / MAX_SP);
+    if(mv && !cr) cal.vCruise100 = mulDiv(cal.vMove100, MAX_SP, MOVE_SP);
+    if(cr && !mv) cal.vMove100   = mulDiv(cal.vCruise100, MOVE_SP, MAX_SP);
     calStatus = r.status;
     calSeq = r.seq;
     cal.fromRun = r.d.fromRun;
@@ -282,24 +305,21 @@ void calSanitize(){
   }
 }
 
-void printItemStatus(uint8_t s){
-  if(s == ST_PASS)      Serial.print(F("PASS"));
-  else if(s == ST_WEAK) Serial.print(F("WEAK"));
-  else if(s == ST_FAIL) Serial.print(F("FAIL(default used)"));
-  else                  Serial.print(F("default"));
+/* [E33] Print name number k of a list of names stored one after the other
+ * in flash ("a\0b\0c"): one small loop instead of one print for each name
+ * saves flash. k must be in the list. */
+void printNth(const char *list, uint8_t k){
+  while(k--) while(pgm_read_byte(list++)) ;
+  Serial.print((const __FlashStringHelper*)list);
 }
 
-void printItemName(uint8_t k){
-  switch(k){
-    case CI_SENSOR: Serial.print(F("sensors"));  break;
-    case CI_DEADBD: Serial.print(F("deadband")); break;
-    case CI_TRIM:   Serial.print(F("trim"));     break;
-    case CI_MOVE:   Serial.print(F("move"));     break;
-    case CI_CRUISE: Serial.print(F("cruise"));   break;
-    case CI_TURN:   Serial.print(F("turn"));     break;
-    case CI_SPIN:   Serial.print(F("spin"));     break;
-  }
-}
+/* ST_NONE, ST_PASS, ST_WEAK, ST_FAIL */
+const char itemStatusNames[] PROGMEM = "default\0PASS\0WEAK\0FAIL(default used)";
+void printItemStatus(uint8_t s){ printNth(itemStatusNames, s <= ST_FAIL ? s : ST_NONE); }
+
+/* CI_SENSOR ... CI_SPIN */
+const char itemNames[] PROGMEM = "sensors\0deadband\0trim\0move\0cruise\0turn\0spin";
+void printItemName(uint8_t k){ if(k < CI_COUNT) printNth(itemNames, k); }
 
 void printCalSource(){
   Serial.print(F("CAL: "));
@@ -313,6 +333,8 @@ void printCalSource(){
   }else if(calSource == 2){
     Serial.print(F("values pasted into calibration.h from run #"));
     Serial.println(cal.fromRun);
+  }else if(CAL_SENSORS_MEASURED){
+    Serial.println(F("sensor levels measured (calibration.h); motors and turns: defaults. Run the calibration for good turns."));
   }else{
     Serial.println(F("DEFAULTS: never calibrated. Run MODE_CALIBRATE once for good turns."));
   }
@@ -378,13 +400,14 @@ bool brownOutReset(){
   uint8_t f = resetCause();
   return (f & RF_BOR) && !(f & RF_POR);
 }
+/* [E33] the names of the flags RF_POR, RF_EXT, RF_BOR, RF_WDT (bits 0 to 3),
+ * printed by one loop (less flash than one print for each) */
+const char resetNames[] PROGMEM = "power-on \0reset-button/USB \0BROWN-OUT \0watchdog ";
+static_assert(RF_POR == 1 && RF_EXT == 2 && RF_BOR == 4 && RF_WDT == 8, "resetNames: flags must be bits 0 to 3");
 void printResetCause(){
   uint8_t f = resetCause();
   Serial.print(F("reset cause: "));
-  if(f & RF_POR) Serial.print(F("power-on "));
-  if(f & RF_EXT) Serial.print(F("reset-button/USB "));
-  if(f & RF_BOR) Serial.print(F("BROWN-OUT "));
-  if(f & RF_WDT) Serial.print(F("watchdog "));
+  for(uint8_t k=0;k<4;k++) if(f & (1 << k)) printNth(resetNames, k);
   if(f == 0)     Serial.print(F("unknown (the bootloader cleared it)"));
   Serial.println();
 }
@@ -444,8 +467,10 @@ void setMotor(int uL, int uR){
  *  compares the odometer with CELL_CM and corrects itself.
  * ===================================================================== */
 float odoCm = 0;
+#if ROBOT_MODE != MODE_MISSION          /* [E33] only the calibration sketch reads these */
 float odoU = 0;                        /* the same in speed units x seconds (calibration) */
 float odoEffL = 0, odoEffR = 0;        /* speed given to each wheel x seconds (calibration) */
+#endif
 unsigned long odoLastUs = 0;
 float vScale = 1.0;
 uint8_t vSamples = 0;                  /* cells measured during this run */
@@ -467,6 +492,13 @@ float speedCms(int u){
   return v * vScale;
 }
 
+/* [E33] p percent of x, rounded down, the same as x * p / 100 (one copy of
+ * the 32-bit code saves flash; x * 13 / 10 is pctOf(x, 130)) */
+__attribute__((noinline)) unsigned long pctOf(unsigned long x, uint16_t p){ return x * p / 100UL; }
+
+/* [E33] a time limit made for the calibrated speed, longer on a slower robot (never shorter) */
+__attribute__((noinline)) unsigned long slowMs(unsigned long ms){ return vScale < 1.0 ? (unsigned long)(ms / vScale) : ms; }
+
 void odoTick(){
   unsigned long now = micros();
   unsigned long dt = now - odoLastUs;
@@ -474,9 +506,11 @@ void odoTick(){
   if(dt > 200000UL) return;                    /* first call, or a long pause */
   float u2 = (curUL + curUR) * 0.5;
   float s = (float)dt * 1e-6;
+#if ROBOT_MODE != MODE_MISSION
   odoU += u2 * s;
   odoEffL += curUL * s;
   odoEffR += curUR * s;
+#endif
   int u = (int)u2;
   float d = speedCms(u) * s;
   odoCm += (u >= 0) ? d : -d;
@@ -611,7 +645,7 @@ int centroid256(){
  *  and the rest on white. Up to two odd channels (for example one stuck
  *  reading black) are allowed; they are marked and not used.
  * ===================================================================== */
-struct RawLook { uint8_t lineLow, mask, odd; uint16_t white, black, gap; uint16_t v[8]; };
+struct RawLook { uint8_t lineLow, mask, odd, wrongSide; uint16_t white, black, gap; uint16_t v[8]; };
 
 bool rawLook(RawLook &r){
   uint8_t idx[8];
@@ -634,8 +668,17 @@ bool rawLook(RawLook &r){
   r.gap = g;
   if(g < 120) return false;
   uint8_t nLow = at + 1, nHigh = 7 - at;
-  if(nLow == nHigh) return false;
-  bool lineHigh = nHigh < nLow;                   /* the few channels are the line */
+  r.wrongSide = 0;
+  /* [E33] Which way black reads is a setting (CAL_LINE_LOW), never guessed
+   * from one look. With the bar partly on a black area (a crossing, a mark,
+   * the robot being put down) the few WHITE sensors there looked like a
+   * line: the robot swapped black and white, and then saw its real line as
+   * a crossing and never started. The few channels must be the black ones. */
+  bool lineHigh = !CAL_LINE_LOW;
+  if(lineHigh ? (nHigh >= nLow) : (nLow >= nHigh)){
+    r.wrongSide = (nLow != nHigh);        /* (a hint: CAL_LINE_LOW may be wrong) */
+    return false;
+  }
   uint8_t grp = 0;
   for(uint8_t a=0;a<8;a++) if(lineHigh ? (a > at) : (a <= at)) grp |= (0x80 >> idx[a]);
   /* the line itself: the group of side-by-side channels nearest the middle */
@@ -658,6 +701,9 @@ bool rawLook(RawLook &r){
   uint16_t w = sw / nw, b = sb / nb;
   r.white = lineHigh ? w : (uint16_t)(1023 - w);  /* black-high scale */
   r.black = lineHigh ? b : (uint16_t)(1023 - b);
+  /* [E33] "white" that dark is no white: the robot is held up in the air
+   * (every sensor then reads almost black, a few a little more) */
+  if(r.white > 600) return false;
   return true;
 }
 
@@ -689,7 +735,7 @@ String getSensor(){
   return(x);
 }
 
-uint8_t maskOf(String L){
+uint8_t maskOf(const String &L){        /* [E33] by reference: no copy */
   uint8_t m = 0;
   for(uint8_t k=0;k<8;k++){ m <<= 1; if(L.charAt(k) == '1') m |= 1; }
   return m;
@@ -798,7 +844,7 @@ void lineLost(){
   }
   int d = (e < 0) ? -1 : 1;                    /* line last seen on the right: look right first */
   unsigned long ts = t - holdMs;
-  unsigned long a = (unsigned long)(cal.t90L + cal.t90R) * 15 / 100;   /* ~27 degrees */
+  unsigned long a = slowMs(pctOf(cal.t90L + cal.t90R, 15));   /* ~27 degrees */
   if(ts < a)          spinAt( d, TURN_SLOW_SP);
   else if(ts < 3 * a) spinAt(-d, TURN_SLOW_SP);
   else if(ts < 4 * a) spinAt( d, TURN_SLOW_SP);
@@ -890,6 +936,9 @@ float    prevLegRef = 0, prevLegGap = CELL_CM;
 bool     prevLegRolling = false;
 bool     gridArmed = true;
 uint8_t  nRejected = 0, nCredited = 0, nRetried = 0;
+#if ROBOT_MODE == MODE_MISSION
+bool     markUsed = false;    /* [E33] the mark rescue of countGrid: once per run */
+#endif
 
 bool checkGrid(){
   uint8_t m = scanBar();           /* [E33] slides: String ch = getSensor(); */
@@ -923,10 +972,10 @@ uint8_t lookAhead(float skipCm, float lookCm){
   /* straight while the tape of the crossing is still under the bar (its
    * tail can look like a line at one end of the bar) ... */
   setMotor(s, s);
-  while(odoCm - o0 < skipCm && millis() - t0 < 300){ crossMask |= scanBar(); }
+  while(odoCm - o0 < skipCm && millis() - t0 < slowMs(300)){ crossMask |= scanBar(); }
   uint8_t nLine = 0, nBlank = 0, nWide = 0, nAll = 0;
   o0 = odoCm; t0 = millis();
-  while((odoCm - o0 < lookCm || nAll < 12) && millis() - t0 < 400 && nAll < 250){
+  while((odoCm - o0 < lookCm || nAll < 12) && millis() - t0 < slowMs(400) && nAll < 250){
     uint8_t m = scanBar();
     /* ... then keep steering, but only on a narrow line near the middle: with
      * unmatched motors a few cm of blind driving can lose the line */
@@ -974,13 +1023,36 @@ void restoreLeg(){
 /* [E33] a distance in cm as whole tenths, for the log and the trace
  * (noinline: one copy of the float code saves flash) */
 __attribute__((noinline)) int16_t tenths(float cm){ return (int16_t)(cm * 10); }
-/* [E33] vScale x 100, rounded (kept within 40 .. 250), the same way */
+/* [E33] vScale x 100, rounded (kept within 20 .. 250), the same way */
 __attribute__((noinline)) int vScale100(){ return (int)(vScale * 100 + 0.5); }
 
 /* [E33] one record of the run log for the crossing just checked */
 void logCross(uint8_t type, int n){
   logAdd((uint8_t)(type | (crossAhead << 4)), n, tenths(crossDist), tenths(crossGap),
          crossMask, (uint8_t)vScale100());
+}
+
+/* [E33] CHECK 2 (see countGrid): a real crossing lights BOTH ends of the
+ * bar, and at the field's edge the end on the field side is enough.
+ * ratio = legGap / crossDist */
+__attribute__((noinline)) bool shapeFits(uint8_t info, float ratio){
+  bool leftEnd = crossMask & 0xE0, rightEnd = crossMask & 0x07;
+  if(leftEnd && rightEnd) return true;
+  if((leftEnd && (info & HALF_OK_L)) || (rightEnd && (info & HALF_OK_R))) return true;
+  /* [E33] worn tape: one arm of the real crossing has faded. It is
+   * still this crossing if it came where it was expected and what is
+   * past it fits (line after a MID crossing, none after a column end;
+   * either one heading out of the field at C1 / C4, where the line
+   * ahead is only the short overhang).
+   * On the wrong line (along TOP after a bad 180) the first column
+   * comes far from where the next crossing should be.
+   * A leg that began standing (after a turn, a 180 or the start) reads
+   * long: the odometer adds up the speed the wheels were told, and they
+   * need a moment to get up to it. There the first crossing came at 0.6
+   * to 0.9 of the distance read, so after a stop the window opens down
+   * to 0.55. */
+  return ratio > (legRolling ? 0.8 : 0.55) && ratio < 1.25
+      && ((info & AHEAD_MAY_BLANK) || (crossAhead == AH_LINE) == ((info & 3) != K_END));
 }
 
 int countGrid(int n){
@@ -1042,7 +1114,7 @@ int countGrid(int n){
       while(clear < 2){                  /* slides: while(checkGrid());           */
         if(checkGrid()) clear = 0; else clear++;
         crossMask |= lineMask;
-        if(millis() - tIn > CROSS_MAX_MS) fault(2, F("on a crossing for too long: driving along a line"));
+        if(millis() - tIn > slowMs(CROSS_MAX_MS)) fault(2, F("on a crossing for too long: driving along a line"));
       }
       tEdge = millis();
       edgeOdo = odoCm;
@@ -1065,6 +1137,8 @@ int countGrid(int n){
        * speed one cell after the last corrects it. Until then nothing is
        * judged "missed" (a slow robot would look like one that missed a line). */
       bool speedKnown = vSamples > 0;
+      float vOld = vScale;
+      float ratio = legGap / crossDist;          /* > 1: the robot is faster than it thought */
 
       /* [E33] CHECK 1: far too early -> a double count or a smudge. A leg
        * shorter than half a cell (back to MID after a 180) is only a few cm:
@@ -1089,6 +1163,22 @@ int countGrid(int n){
         traceEvent(mark ? F("not counted: a mark beside the line?") : F("not counted: too early"));
         return (n);
       }
+#if ROBOT_MODE == MODE_MISSION
+      /* [E33] RECOVERY (once per run, only where CHECK 2 below would stop
+       * the robot): a half crossing that came before the next crossing is
+       * due (legGap, plus 5 cm after a stop: such a leg reads long, see
+       * shapeFits) is a black mark beside the line just before the
+       * crossing: not counted, the real crossing still comes. Only once
+       * the speed is known: had it been the real crossing, the next one
+       * comes a cell late, and CHECK 3 counts it as missed (or stops the
+       * robot at a turn or an end). */
+      if(speedKnown && !markUsed && !shapeFits(caseInfo(n+1), ratio)
+         && crossDist < legGap + (legRolling ? 0 : 5.0)){
+        markUsed = true;
+        logCross(LG_RECMARK, n);
+        return (n);
+      }
+#endif
       /* [E33] CHECK 3: about one cell too far -> a crossing was missed */
       if(speedKnown && crossDist > legGap + 0.5 * CELL_CM){
         if(next == K_PASS){
@@ -1102,10 +1192,15 @@ int countGrid(int n){
           fault(4, F("missed a turn or an end: the robot is past it"));
         }
       }
-      /* [E33] speed check (the battery): correct the odometer */
-      float ratio = legGap / crossDist;          /* > 1: the robot is faster than it thought */
+      /* [E33] speed check (the battery): correct the odometer
+       * (ratio = legGap / crossDist, worked out before CHECK 1) */
       if(!speedKnown){
-        if(ratio > 0.4 && ratio < 2.5){
+        /* [E33] not from a leg shorter than half a cell (route 132: back
+         * to MID after the first pick and the 180). It is only a few cm, so
+         * it holds mostly the error of where the pick and the 180 left the
+         * robot, not its speed (a fast robot learned 1.2 instead of 1.9
+         * and turned 5 cm past C1 MID): the next whole leg measures it */
+        if(legGap >= CELL_CM / 2 && ratio > 0.2 && ratio < 2.5){
           vScale *= ratio;
           /* [E33] the leg from the start is only as long as the robot was
            * put down: use it, but judge "missed" only after a whole cell
@@ -1123,7 +1218,12 @@ int countGrid(int n){
         if(vSamples < 255) vSamples ++;
       }
       if(vScale > 2.5) vScale = 2.5;
-      if(vScale < 0.4) vScale = 0.4;
+      if(vScale < 0.2) vScale = 0.2;
+      /* [E33] the few cm driven since the bar left this crossing (the look
+       * past it) were added up with the old speed: correct them too (on a
+       * fast robot the first pick of route 132, right after this crossing,
+       * stood 2 cm too far) */
+      if(vScale != vOld) odoCm = edgeOdo + (odoCm - edgeOdo) * (vScale / vOld);
       /* [E33] CHECK 2: a real crossing lights BOTH ends of the bar. Only one
        * end lit means the robot is driving ALONG a TOP or BOT line past a
        * column: it is on the wrong line (this is how the robot ended up
@@ -1131,21 +1231,12 @@ int countGrid(int n){
        * field's edge the outside line (the overhang) may be too short to
        * reach the bar, so only the end on the field side lights. */
       uint8_t info = caseInfo(n+1);
-      bool leftEnd = crossMask & 0xE0, rightEnd = crossMask & 0x07;
-      if(!(leftEnd && rightEnd)){
-        bool ok = (leftEnd && (info & HALF_OK_L)) || (rightEnd && (info & HALF_OK_R));
-        /* [E33] worn tape: one arm of the real crossing has faded. It is
-         * still this crossing if it came where it was expected and what is
-         * past it fits (line after a MID crossing, none after a column end).
-         * On the wrong line (along TOP after a bad 180) the first column
-         * comes far from where the next crossing should be. */
-        if(ratio > 0.8 && ratio < 1.25 && (crossAhead == AH_LINE) == ((info & 3) != K_END)) ok = true;
-        if(!ok){
-          numGride = n + 1;
-          traceEvent(F("half crossing"));
-          logCross(LG_CROSS, n + 1);        /* the log keeps the half crossing's mask */
-          fault(3, F("half crossing: the robot is on the wrong line"));
-        }
+      /* (the test, and its worn-tape exception, are in shapeFits) */
+      if(!shapeFits(info, ratio)){
+        numGride = n + 1;
+        traceEvent(F("half crossing"));
+        logCross(LG_CROSS, n + 1);          /* the log keeps the half crossing's mask */
+        fault(3, F("half crossing: the robot is on the wrong line"));
       }
       saveLeg();
       legRef = edgeOdo;
@@ -1168,10 +1259,14 @@ int countGrid(int n){
   return (n);
 }
 
+/* [E33] how far the robot rolls after a brake at speed u, in cm (one copy
+ * of the float code saves flash) */
+__attribute__((noinline)) float coastCm(int u){ return speedCms(u) * BRAKE_COAST_MS / 1000.0; }
+
 void stopRobot(){
   odoTick();
   int u = (curUL + curUR) / 2;         /* [E33] the robot rolls a little after a brake */
-  float c = speedCms(u) * BRAKE_COAST_MS / 1000.0;
+  float c = coastCm(u);
   odoCm += (u >= 0) ? c : -c;
   digitalWrite(F_L,1); digitalWrite(B_L,1);
   digitalWrite(F_R,1); digitalWrite(B_R,1);
@@ -1228,7 +1323,7 @@ void moveCm(float cm){
  * back up. */
 void rollToBarPast(float target){
   int s = MOVE_SP;
-  float coast = speedCms(s) * BRAKE_COAST_MS / 1000.0;
+  float coast = coastCm(s);
   unsigned long t0 = millis();
   while(barPast() < target - coast){
     /* [E33] still on the crossing's own tape: taken at a slant, its tail
@@ -1236,7 +1331,7 @@ void rollToBarPast(float target){
      * past C1 / C4 the robot then turned onto the column) */
     if(barPast() < TAPE_W_CM + 0.7) setMotor(s, s);
     else steerAt(s);
-    if(millis() - t0 > 3000) break;
+    if(millis() - t0 > slowMs(3000)) break;
   }
   stopRobot();
   delay(SETTLE_MS);
@@ -1371,8 +1466,15 @@ bool spinTurn(int dir, int deg, uint8_t skip){
   unsigned long full = turnFullMs(dir, deg);
   /* a 180 cannot be on its new road before about 72 degrees; a 90 only
    * ignores flicker right at the start */
-  unsigned long tMin = full * (deg >= 180 ? 40UL : 10UL) / 100UL;
-  unsigned long tMax = full * 250UL / 100UL;
+  unsigned long tMin = pctOf(full, deg >= 180 ? 40 : 10);
+  /* [E33] no speed measured yet in this run (route 132's first turn): the time
+   * may be far from this run's, the default time on a slow robot, or even a
+   * calibrated one made on a fresher battery (turnFullMs has no vScale yet) */
+#if ROBOT_MODE == MODE_MISSION
+  unsigned long tMax = pctOf(full, vSamples ? 250 : 600);
+#else
+  unsigned long tMax = pctOf(full, (turnTimed() || vSamples) ? 250 : 600);
+#endif
   SpinTrack k;
   spinBegin(k, dir);
   /* [E33] At a column end the end line can already be under the bar when
@@ -1404,7 +1506,7 @@ bool spinTurn(int dir, int deg, uint8_t skip){
     /* Over white the bar cannot tell whether the robot is turning, so a
      * stalled wheel shows up only as a turn that takes too long: then add
      * speed, a little at a time (a "stall ladder"). */
-    if(t > full * 13 / 10 && now - tBump > 300 && bump < 40){
+    if(t > pctOf(full, 130) && now - tBump > 300 && bump < 40){
       bump += 10; tBump = now;
       int u = (target ? TURN_SLOW_SP : TURN_SP) + bump;
       spinAt(dir, u);
@@ -1415,7 +1517,7 @@ bool spinTurn(int dir, int deg, uint8_t skip){
     m &= (uint8_t)(p | (p << 1) | (p >> 1));
     /* [E33] a line after a long blank that did not come in: it is at the
      * trailing end, so the bar has swept past a road it saw only there */
-    bool lost = (k.state == 0 && m && now - tClear > full * 3 / 10);
+    bool lost = (k.state == 0 && m && now - tClear > pctOf(full, 30));
     if(m) tClear = now;
     if(ev == SE_OUT && k.counts){
       if(target){                          /* swept past it: look for the next one */
@@ -1453,7 +1555,7 @@ bool spinTurn(int dir, int deg, uint8_t skip){
      * first quarter of the turn, the road only near its end. A first line
      * after well over half of it is the road: the end line had a gap there.
      * (60 %, not less: a weak wheel slow to start delays the end line.) */
-    if(ev == SE_IN && passes < skip && turnTimed() && t > full * 60 / 100) passes = skip;
+    if(ev == SE_IN && passes < skip && turnTimed() && t > pctOf(full, 60)) passes = skip;
     if(ev == SE_IN && passes >= skip && t >= tMin && !target){
       target = true;                       /* the line we want is coming in: slow down */
       spinAt(dir, TURN_SLOW_SP + bump);
@@ -1467,6 +1569,15 @@ bool spinTurn(int dir, int deg, uint8_t skip){
   return true;
 }
 
+/* [E33] how long one nudge drives the motors, in ms. In the mission it is
+ * longer for one more try (afterTurn): on a robot with slow motors a 12 ms
+ * nudge may not move it at all. */
+#if ROBOT_MODE == MODE_MISSION
+uint8_t nudgeMs = 12;
+#else
+#define nudgeMs 12
+#endif
+
 /* [E33] After a turn: a narrow line must be under the bar, near the middle.
  * Nudges the robot until it is; looks a little each way if the line is not
  * there. Returns false if it cannot find it. */
@@ -1474,7 +1585,7 @@ bool searchLine(int dir, unsigned long ms){
   unsigned long t0 = millis();
   while(millis() - t0 < ms){
     spinAt(dir, TURN_SLOW_SP);
-    delay(12);
+    delay(nudgeMs);
     setMotor(0, 0);
     delay(8);
     uint8_t m = scanBar();
@@ -1484,7 +1595,7 @@ bool searchLine(int dir, unsigned long ms){
 }
 
 bool centreOnLine(int lastDir){
-  unsigned long t90 = (cal.t90L + cal.t90R) / 2;
+  unsigned long t90 = slowMs((cal.t90L + cal.t90R) / 2);
   uint8_t odd = 0;                       /* readings in a row that make no sense */
   bool moved = false;
   for(uint8_t k=0;k<30;k++){
@@ -1506,7 +1617,7 @@ bool centreOnLine(int lastDir){
       if(abs(e) <= 2) return true;
       int d = (e > 0) ? 1 : -1;          /* line on the right: turn right */
       spinAt(d, TURN_SLOW_SP);
-      delay(12);
+      delay(nudgeMs);
       setMotor(0, 0);
     }else if(b == 0){
       /* turns stop late more often than early: look back first */
@@ -1530,7 +1641,26 @@ bool centreOnLine(int lastDir){
 }
 
 void afterTurn(int dir){
-  if(!centreOnLine(dir)) fault(7, F("no line under the bar after the turn"));
+  bool ok = centreOnLine(dir);
+#if ROBOT_MODE == MODE_MISSION
+  /* [E33] RECOVERY for FAULT 7 (only where the robot would stop, once per
+   * turn): centreOnLine gave up. Mostly a narrow line IS under the bar, at
+   * one side, and the nudges were too short to move the robot. Try once
+   * more with nudges more than three times as long. If the bar sees
+   * nothing, a gap in worn tape may be right under it: first drive 3 cm
+   * on. (The search is the same as before, about 35 degrees each way: the
+   * next road is 90 degrees away.) */
+  if(!ok){
+    uint8_t m = scanBar();
+    if(!m) moveCm(3.0);
+    nudgeMs = 40;
+    ok = centreOnLine(dir);
+    nudgeMs = 12;
+    logAdd(LG_RECTURN, numGride, !m, ok, m, lineMask);
+    traceEvent(F("RECOVER turn"));
+  }
+#endif
+  if(!ok) fault(7, F("no line under the bar after the turn"));
   stopRobot();
   logFlush();                            /* standing still: write the run log */
   clearPid();
@@ -1539,8 +1669,7 @@ void afterTurn(int dir){
 
 bool turnTimed(){                          /* can turn times be checked? */
   if(calSource == 2) return true;
-  uint8_t s = calItem(calStatus, CI_TURN);
-  return calSource == 1 && (s == ST_PASS || s == ST_WEAK);
+  return calSource == 1 && calUsed(calStatus, CI_TURN);
 }
 
 void logTurn(int dir, int deg){
@@ -1806,13 +1935,11 @@ void beginFnc(){
  *  A fault stops the robot, keeps the gripper as it is, prints why, and
  *  blinks the LED (D13) the fault number of times, over and over.
  * ===================================================================== */
-void printAhead(uint8_t a){
-  if(a == AH_LINE)       Serial.print(F("LINE"));
-  else if(a == AH_BLANK) Serial.print(F("BLANK"));
-  else if(a == AH_WIDE)  Serial.print(F("WIDE"));
-  else if(a == AH_LOST)  Serial.print(F("RAN-OUT"));
-  else                   Serial.print(F("UNSURE"));
-}
+/* AH_UNSURE, AH_LINE, AH_BLANK, AH_WIDE, AH_LOST ([E33] one list: less flash) */
+const char aheadNames[] PROGMEM = "UNSURE\0LINE\0BLANK\0WIDE\0RAN-OUT";
+static_assert(AH_UNSURE == 0 && AH_LINE == 1 && AH_BLANK == 2 && AH_WIDE == 3 && AH_LOST == 4,
+              "aheadNames: must follow the AH_ numbers");
+void printAhead(uint8_t a){ printNth(aheadNames, a <= AH_LOST ? a : AH_UNSURE); }
 
 void printMask(uint8_t m){
   for(uint8_t i=0;i<8;i++) Serial.print((m & (0x80 >> i)) ? '1' : '0');
@@ -1832,8 +1959,9 @@ void traceEvent(const __FlashStringHelper *what){
 #endif
 }
 
-/* The calibration mode sets this so a fault there saves what it measured
- * and prints a report instead of only stopping. */
+/* MODE_CALIBRATE and MODE_TURN_CHECK (e33_calibrate) set this, so a fault
+ * there saves what it measured or prints the report so far, instead of
+ * only stopping. */
 typedef void (*FaultHook)(uint8_t code, const __FlashStringHelper *why);
 FaultHook faultHook = 0;
 
@@ -1842,8 +1970,13 @@ void fault(uint8_t code, const __FlashStringHelper *why){
   digitalWrite(STBY,0);
   runMark = 0;                           /* stopped on purpose, not a restart */
 #if ROBOT_MODE == MODE_MISSION
-  logAdd(LG_FAULT, numGride, tenths(odoCm - legRef), tenths(legGap), lineMask, code);
-  logFlush();
+  /* [E33] FAULT 12 before the first crossing, with the old record still
+   * there: the wheels never turned (motors off, USB only), so this start
+   * is not a run and the log of the last run is kept */
+  if(code != 12 || numGride != 0 || !logFresh){
+    logAdd(LG_FAULT, numGride, tenths(odoCm - legRef), tenths(legGap), lineMask, code);
+    logFlush();
+  }
   logEnd(LS_FAULT);
 #endif
   if(faultHook) faultHook(code, why);

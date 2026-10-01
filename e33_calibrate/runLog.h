@@ -5,9 +5,8 @@
  *  While the mission runs, every crossing, turn, pick, place and fault is
  *  written down in a few bytes ([E33] and the supply voltage: the POWER
  *  lines, at the start, at each pick and place, and at the end). The next
- *  time the Nano starts in
- *  MODE_MISSION (for example when you plug in USB and open the Serial
- *  Monitor) it prints the record of the last run. So a run without the
+ *  time e33_mission starts (for example when you plug in USB and open the
+ *  Serial Monitor) it prints the record of the last run. So a run without the
  *  cable can still be read afterwards: copy everything from BEGIN to END
  *  and send it.
  *
@@ -17,7 +16,8 @@
  *
  *  The record of the last run is kept until a new run has really moved: it
  *  is replaced at the new run's first stop (its first turn). So switching on
- *  with the motors off, or on the line for a moment, does not wipe it. The
+ *  with the motors off, or on the line for a moment, does not wipe it (a
+ *  FAULT 12 before the first crossing is not written: see fault()). The
  *  record also says how the run ended: normally, with a fault, with the
  *  power switched off, or with the Nano restarting in the middle.
  *
@@ -69,6 +69,14 @@ static_assert(sizeof(LogRec) == LOG_RECSZ, "LogRec must be LOG_RECSZ bytes");
                                * while the servos moved (the end: of the whole run),
                                * x = 0 start, 1 pick, 2 place, 3 last place, 4 end;
                                * high bits 1 = below VCC_WARN_MV */
+#define LG_RECTURN 14         /* [E33] RECOVERY: no line in the middle after a turn
+                               * (FAULT 7), one more try with longer nudges:
+                               * a = 1 drove 3 cm on first (the bar saw nothing),
+                               * b = 1 found, mask = bar before, x = bar after */
+#define LG_RECMARK 13         /* [E33] RECOVERY: a half crossing before the
+                               * crossing was due, not counted (a mark beside
+                               * the line), where FAULT 3 would have stopped the
+                               * robot. The same fields as CROSS */
 
 /* [E33] FAULT and DONE end a run: the last place is kept for them (a
  * POWER record has a higher number but is an ordinary one) */
@@ -237,9 +245,10 @@ void logPrint(){
         labelInt(F(" light="), r.b);
         if(hi) Serial.print(F(" route=132"));
         break;
-      case LG_CROSS: case LG_REJECT: case LG_CREDIT: case LG_ENDLOST:
+      case LG_CROSS: case LG_REJECT: case LG_CREDIT: case LG_ENDLOST: case LG_RECMARK:
         Serial.print(ty == LG_CROSS ? F("CROSS") : ty == LG_REJECT ? F("REJECT(too early)")
-                   : ty == LG_CREDIT ? F("MISSED-ONE(counted)") : F("END(line ran out)"));
+                   : ty == LG_CREDIT ? F("MISSED-ONE(counted)") : ty == LG_ENDLOST ? F("END(line ran out)")
+                   : F("RECOVER-MARK(not counted)"));
         printDistExpected(r.a, r.b);
         labelMask(F(" mask="), r.mask);
         printAheadV(hi, r.x);
@@ -272,6 +281,10 @@ void logPrint(){
         break;
       case LG_POWER:
         printPower(r.x, (uint16_t)r.a, (uint16_t)r.b, hi & 1);
+        break;
+      case LG_RECTURN:
+        labelInt(F("RECOVER-TURN moved3cm="), r.a); labelInt(F(" found="), r.b);
+        labelMask(F(" bar-before="), r.mask); labelMask(F(" bar-after="), r.x);
         break;
       default:
         Serial.print('?');

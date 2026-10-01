@@ -25,14 +25,16 @@
  *                      ends facing the way it started. One line per turn,
  *                      then a report. Copy it from BEGIN to END and send it.
  *
- *  Serial Monitor: 115200 baud, "Newline" (or "Both NL & CR"; with "No line
- *  ending" an empty Enter sends nothing).
+ *  Serial Monitor: 115200 baud, "New Line" (or "Both NL & CR"; with "No Line
+ *  Ending" an empty Enter sends nothing).
  * ===================================================================== */
 #ifndef CHECKMODES_H
 #define CHECKMODES_H
 
-/* Wait for Enter in the Serial Monitor, or for secs seconds. */
-void waitEnter(uint16_t secs, bool still = true){
+/* Wait for Enter in the Serial Monitor, or for secs seconds.
+ * after: 0 = a standing-still measurement follows, 1 = the sensor sweep by
+ * hand, 2 = the turn check (the robot is about to turn: step back). */
+void waitEnter(uint16_t secs, uint8_t after = 0){
   while(Serial.available()) Serial.read();
   Serial.print(F("   press Enter in the Serial Monitor when ready (or wait "));
   Serial.print(secs); Serial.println(F(" s)"));
@@ -43,7 +45,8 @@ void waitEnter(uint16_t secs, bool still = true){
     delay(5);
   }
   digitalWrite(LED_PIN, 0);
-  Serial.println(still ? F("   measuring, keep still...") : F("   go: turn it left and right now"));
+  Serial.println(after == 0 ? F("   measuring, keep still...") : after == 1 ? F("   go: turn it left and right now")
+                             : F("   step back: it turns once the line is steady"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -146,13 +149,13 @@ void scReport(){
   Serial.print(F("levels in use now: "));
   if(calSource == 1){ Serial.print(F("EEPROM calibration run #")); Serial.println(cal.fromRun); }
   else if(calSource == 2) Serial.println(F("pasted into calibration.h"));
-  else Serial.println(F("defaults (never calibrated)"));
+  else Serial.println(CAL_SENSORS_MEASURED ? F("the measured levels in calibration.h") : F("defaults (never calibrated)"));
   Serial.print(F("black reads ")); Serial.println(low ? F("LOW") : F("HIGH"));
   if(sameAs1)
     Serial.println(F("(steps 1 and 4 read almost the same: was step 1 on white and step 4 on the line?)"));
   if(low != (bool)cal.lineLow)
     Serial.println(F("(the levels in use now expect the other way: sees_line_now is NO until you calibrate)"));
-  if(calSource == 0)
+  if(calSource == 0 && !CAL_SENSORS_MEASURED)
     Serial.println(F("(sees_line_now uses the DEFAULT levels: NO is normal before MODE_CALIBRATE; after it, all must say yes)"));
   Serial.println(F("ch,white,white_noise,white_single_read,black,contrast,line_in_middle,on_level_now,sees_line_now,verdict"));
   for(uint8_t i=0;i<8;i++){
@@ -236,7 +239,8 @@ void scReport(){
   Serial.print(F("step 3 (line in the middle) with the levels in use now: ")); printMask(m);
   Serial.println((m == 0x18 || m == 0x10 || m == 0x08 || m == 0x38 || m == 0x1C) ? F("  good") : F("  (expected 00011000)"));
 
-  Serial.println(F("sensor part of CAL VALUES (not needed after MODE_CALIBRATE; to use it, replace only these 4 lines):"));
+  Serial.println(F("sensor part of CAL VALUES (not needed: MODE_CALIBRATE measures them again. To use them, select the"));
+  Serial.println(F("same 4 lines in calibration.h, paste over them, then run tools\\copy_settings.bat):"));
   Serial.print(F("#define CAL_LINE_LOW ")); Serial.println(low ? 1 : 0);
   Serial.print(F("#define CAL_LO { "));
   for(uint8_t i=0;i<8;i++){ Serial.print(white[i]); Serial.print(i < 7 ? F(", ") : F(" }\n")); }
@@ -259,7 +263,7 @@ void runSensorCheck(){
     Serial.println(F("\nSTEP 2 of 4: with the bar over a line, turn the robot slowly LEFT and RIGHT by"));
     Serial.println(F("hand, wheels on the table (do not lift it: a lifted bar reads black), so the"));
     Serial.println(F("line passes under EVERY sensor, A0 to A7 and back. It watches for 15 s."));
-    waitEnter(20, false);
+    waitEnter(20, 1);
     scSweep(15);
 
     Serial.println(F("\nSTEP 3 of 4: put the line under the MIDDLE of the bar (between A3 and A4), keep still."));
@@ -410,7 +414,7 @@ void tcSummary(uint8_t code, const __FlashStringHelper *why){
   Serial.print(F("levels and turn times: "));
   if(calSource == 1){ Serial.print(F("EEPROM calibration run #")); Serial.println(cal.fromRun); }
   else if(calSource == 2) Serial.println(F("pasted into calibration.h"));
-  else Serial.println(F("defaults (never calibrated)"));
+  else Serial.println(CAL_SENSORS_MEASURED ? F("measured levels in calibration.h, turn times guessed (never calibrated)") : F("defaults (never calibrated)"));
   Serial.print(F("TURN_SP ")); Serial.print(TURN_SP); Serial.print(F("  TURN_SLOW_SP ")); Serial.print(TURN_SLOW_SP);
   Serial.print(F("  t90 left ")); Serial.print(cal.t90L); Serial.print(F(" right ")); Serial.print(cal.t90R);
   Serial.println(F(" ms"));
@@ -460,13 +464,18 @@ void tcSummary(uint8_t code, const __FlashStringHelper *why){
     else if(mean[a + 1] * 100 > mean[a] * 125)
       tcSay(F("right turns much slower than left: the right wheel is slower than the calibration knows. Calibrate again."));
   }
+  /* [E33] wheels on MID but not on a crossing: a 90 finds no column arm and
+   * turns on to MID again, about twice as long, while a 180 is normal */
+  if(tcSt[0].n && tcSt[1].n && mean[0] * 10 > tcExpected(0) * 16 && mean[1] * 10 > tcExpected(1) * 16
+     && (!tcSt[2].n || mean[2] * 10 < tcExpected(2) * 13))
+    tcSay(F("the 90s took about twice the expected time and the 180s did not: the wheels are on MID but NOT on a crossing. Put the WHEELS on C2 MID or C3 MID and check again."));
   bool slow = false, fast = false;
   for(uint8_t g=0;g<4;g++){
     if(!tcSt[g].n) continue;
     if(mean[g] * 100 > tcExpected(g) * TC_SLOW_PCT) slow = true;
     if(mean[g] * 100 < tcExpected(g) * TC_FAST_PCT) fast = true;
   }
-  if(slow) tcSay(F("turns slower than the calibration expects: weak battery, or the calibration is old. Fresh battery, calibrate again."));
+  if(slow) tcSay(F("turns slower than the calibration expects: the WHEELS not on a crossing (C2 MID or C3 MID), a weak battery, or an old calibration. Check where the wheels are, then fresh battery, calibrate again."));
   if(fast) tcSay(F("turns faster than the calibration expects: a fresher battery than at the calibration? Calibrate again."));
   if(extra)
     tcSay(F("a turn passed an extra line: it spins too fast to stop on the first line. TURN_SP too high for this robot, or the dead band: calibrate again; if it stays, lower TURN_SP and TURN_SLOW_SP a little."));
@@ -598,7 +607,7 @@ void runTurnCheck(){
   if(!turnTimed()) Serial.println(F("NOT CALIBRATED: the expected times are guesses. Run MODE_CALIBRATE first."));
   bool first = true;
   while(true){
-    if(first) waitEnter(30);           /* (a repeat starts with the Enter below) */
+    if(first) waitEnter(30, 2);        /* (a repeat starts with the Enter below) */
     first = false;
     tcWaitLine();
     for(uint8_t g=0;g<4;g++){ tcSt[g].n = 0; tcSt[g].fail = 0; tcSt[g].slow = 0; tcSt[g].fast = 0;

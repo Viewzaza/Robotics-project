@@ -1,5 +1,5 @@
 /* =====================================================================
- *  robot_e33_v2.ino: the e33 mission, written the way the slides teach it
+ *  e33_mission.ino: the e33 mission (the real run), the way the slides teach it
  * =====================================================================
  *
  *  Same shape as robot10: setup() calls beginFnc(), loop() counts crossings
@@ -8,9 +8,10 @@
  *  4, 6 and 9. The library is robot11's controlLibrary.h, with every
  *  change marked [E33].
  *
- *  Your numbers are in calibration.h. That file also chooses the mode:
- *  MODE_MISSION (this route), MODE_CALIBRATE, MODE_METER, MODE_MOTOR_CHECK,
- *  MODE_SENSOR_CHECK, MODE_GRIPPER_CHECK, MODE_TURN_CHECK.
+ *  Your numbers are in calibration.h (the same file as in ../e33_calibrate).
+ *  This program is only the mission. It never calibrates: the checks and
+ *  the calibration are the other program, e33_calibrate. It uses what the
+ *  calibration saved (EEPROM), or the CAL VALUES in calibration.h.
  *
  *  ---------------------------------------------------------------------
  *  THE FIELD (e33)
@@ -26,7 +27,8 @@
  *
  *    START: wheels (axle) over the C1 line, on MID, facing east (right).
  *    The bar is then 9.5 cm past C1. Switch on and step back; the robot
- *    starts by itself once it has seen the line steadily for 1.5 s.
+ *    starts by itself once it has seen the line steadily for START_WAIT_MS
+ *    (0.2 s).
  *
  *      object 3 (top of C4)     ->  x3 (bottom of C2)
  *      object 1 (top of C1)     ->  x1 (bottom of C4)
@@ -114,11 +116,13 @@
  * ===================================================================== */
 
 #include "calibration.h"
-#include "controlLibrary.h"
-#if ROBOT_MODE != MODE_MISSION
-  #include "calibrationMode.h"
-  #include "checkModes.h"
+#ifdef STEP
+  #error "STEP belongs in e33_calibrate.ino: open the e33_calibrate folder for the checks and the calibration"
 #endif
+#if ROBOT_MODE != MODE_MISSION
+  #error "e33_mission is only the mission: the checks and the calibration are in e33_calibrate"
+#endif
+#include "controlLibrary.h"
 
 int numGride = 0;
 #if ROUTE_ORDER == 132
@@ -136,27 +140,12 @@ void finishMission();
 void setup() {
   Serial.begin(SERIAL_BAUD);
   beginFnc();
-#if ROBOT_MODE == MODE_CALIBRATE
-  runCalibration();           /* never comes back */
-#elif ROBOT_MODE == MODE_METER
-  runMeter();
-#elif ROBOT_MODE == MODE_MOTOR_CHECK
-  runMotorCheck();
-#elif ROBOT_MODE == MODE_SENSOR_CHECK
-  runSensorCheck();
-#elif ROBOT_MODE == MODE_GRIPPER_CHECK
-  runGripperCheck();
-#elif ROBOT_MODE == MODE_TURN_CHECK
-  runTurnCheck();             /* [E33] the mission's turns on one crossing */
-#else
   startMission();
-#endif
 }
 
 void loop() {
-#if ROBOT_MODE == MODE_MISSION  /* (the other modes never get here; leaving the
-                                 * route out keeps them small enough for the Nano) */
-  /* [E33] after the last object (41 -> 42) there is nothing more to count:
+  /* [E33] after the last object (41 -> 42, or 32 -> 33 on route 132) there
+   * is nothing more to count:
    * with the bar resting on the BOT line, countGrid() would ride over it
    * with the gripper open and push object 2 off x2 */
   if(numGride < N_DONE) numGride = countGrid(numGride);
@@ -217,7 +206,6 @@ void loop() {
 
     default : followLine();
   }
-#endif
 #endif
 }
 
@@ -284,7 +272,7 @@ uint8_t caseInfo(int n){
 /* =====================================================================
  *  START  [E33]
  *  No button and no calibration motion: the robot waits, standing still,
- *  until the bar has seen the line steadily for 1.5 s. While it waits it
+ *  until the bar has seen the line steadily for START_WAIT_MS (0.2 s). While it waits it
  *  prints what the bar sees, so "it does not move" always has a reason.
  * ===================================================================== */
 /* [E33] Is the light the same as where the sensors were calibrated
@@ -300,9 +288,14 @@ int lightCheck(bool known){
     c += (int)cal.hi[i] - (int)cal.lo[i];
     k++;
   }
-  /* white moved by more than a fifth of the white-to-black step: the OFF
-   * level sits at 30 % of it (in the simulator a run failed from 31 %) */
-  if((unsigned)abs(d) * 5 > (unsigned)c){
+  /* white moved by more than a quarter of the white-to-black step: the OFF
+   * level sits at SENS_OFF_PCT (38 %) of it (in the simulator a run failed
+   * from about 40 %; [E33] it was 31 % while SENS_OFF_PCT was 30).
+   * [E33] It was a fifth. Your printouts: with the line under the middle,
+   * the white beside it read 55 to 230 above your plain white (A0 329
+   * against 75), in the same light. Against the whitest white, which is
+   * what MODE_CALIBRATE keeps, that is a fifth: a warning at every start. */
+  if((unsigned)abs(d) * 4 > (unsigned)c){
     Serial.println(F("WARNING: not the light of the calibration: calibrate here"));
     /* the LED flickers for 1 s before it drives: seen without the cable */
     for(uint8_t i=0;i<10;i++){ digitalWrite(LED_PIN, !(i & 1)); delay(100); }
@@ -312,18 +305,29 @@ int lightCheck(bool known){
 
 void startMission(){
   logPrint();                            /* [E33] the record of the last run, if any */
-  /* [E33] after a run that did not finish (a fault, the power cut, a restart)
-   * wait 5 s instead of 1.5 s: plugging in USB to read the log restarts the
-   * Nano, and a robot left on a line would drive off from where it stopped */
-  unsigned long startWait = 1500;
+  /* [E33] it goes as soon as the line has been under the middle of the bar
+   * for START_WAIT_MS. After a run that did not finish (a fault, the power
+   * cut, a restart) it waits longer: plugging in USB to read the log
+   * restarts the Nano, and a robot left on a line would drive off from where
+   * it stopped. */
+  unsigned long startWait = START_WAIT_MS;
   if(logLastState() != LS_ENDED){
-    startWait = 5000;
-    Serial.println(F("Last run did not finish: 5 s start wait (lift the robot to only read the log)."));
+    startWait = START_WAIT_AFTER_STOP_MS;
+    Serial.print(F("Last run did not finish: ")); Serial.print(START_WAIT_AFTER_STOP_MS / 1000);
+    Serial.println(F(" s start wait (lift the robot to only read the log)."));
   }
+  /* [E33] the settings in use, so any printout you send shows them */
+  Serial.print(F("SETTINGS: route ")); Serial.print(ROUTE_ORDER);
+  labelInt(F(", PRACTICE "), PRACTICE);
+  labelTenth(F(", CELL_CM "), (int16_t)(CELL_CM * 10)); labelTenth(F(", ROW_CM "), (int16_t)(ROW_CM * 10));
+  labelTenth(F(", GRIP_REACH_CM "), (int16_t)(GRIP_REACH_CM * 10));
+  labelTenth(F(", OBJ/TGT_BEYOND_CM "), (int16_t)(OBJ_BEYOND_CM * 10)); labelTenth(F("/"), (int16_t)(TGT_BEYOND_CM * 10));
+  labelInt(F(", MAX/MOVE/TURN_SP "), MAX_SP); labelInt(F("/"), MOVE_SP); labelInt(F("/"), TURN_SP);
+  Serial.println();
   Serial.println(F("MISSION: waiting for the line under the bar..."));
   unsigned long tOk = 0, tPrint = 0, tNone = millis(), tBad = 0;
   /* were the sensor levels ever measured on this robot? */
-  bool sensorsKnown = (calSource == 2) ||
+  bool sensorsKnown = CAL_SENSORS_MEASURED || (calSource == 2) ||
     (calSource == 1 && (calItem(calStatus, CI_SENSOR) == ST_PASS || calItem(calStatus, CI_SENSOR) == ST_WEAK));
   while(true){
     uint8_t m = scanBar();
@@ -342,7 +346,7 @@ void startMission(){
       if(now - tOk >= startWait) break;
     }else{
       /* [E33] with measured levels one noisy reading does not restart the
-       * 1.5 s (0.1 s of no line does); with the default levels any doubt
+       * wait (0.1 s of no line does); with guessed levels any doubt
        * restarts it, so the standing-still measurement gets its turn */
       if(!tBad) tBad = now;
       if(now - tBad > 100 || !sensorsKnown) tOk = 0;
@@ -365,7 +369,7 @@ void startMission(){
       Serial.print(F("  bar ")); printMask(m);
       Serial.print(F("  raw"));
       for(uint8_t i=0;i<8;i++){ Serial.print(' '); Serial.print(cal.lineLow ? 1023 - rawV[i] : rawV[i]); }
-      Serial.println(ok ? F("  line OK") : (b >= 5) ? F("  on a crossing, or lifted: put the WHEELS over C1")
+      Serial.println(ok ? F("  line OK") : (b >= 5) ? F("  on a crossing, or lifted: put the WHEELS over C1 (the line dark, the rest lit? CAL_LINE_LOW)")
                                                    : F("  no line in the middle: put the bar on MID"));
     }
   }
@@ -515,7 +519,7 @@ void finishMission(){
   stopRobot();
   digitalWrite(STBY, 0);
   runMark = 0;
-  uint8_t v = (uint8_t)vScale100();      /* (kept within 0.4 .. 2.5) */
+  uint8_t v = (uint8_t)vScale100();      /* (kept within 0.2 .. 2.5) */
   /* [E33] v: the speed this run measured, against the calibration (the battery) */
   logAdd(LG_DONE | (calSource ? 0x10 : 0), numGride, nRejected, nCredited, v, nRetried);
   /* [E33] the supply at the end, and the lowest of the whole run: the last line of the log */

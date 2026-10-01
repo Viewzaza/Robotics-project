@@ -1,0 +1,83 @@
+# The student's own Serial Monitor printouts from the real robot (2026-09-29, an
+# earlier e33_mission build, its waiting screen): one line a second, each
+#   <time> ->   bar <what that build saw>  raw <A0 A1 A2 A3 A4 A5 A6 A7>  <its message>
+# Only the 8 numbers after "raw" are used: they are what the sensors really read.
+# (The "bar" and the message are from that older build; sim/replay_test.sh checks
+# what the CURRENT code makes of the same numbers.)
+#
+# ADD YOUR OWN: copy lines from the Serial Monitor (the mission's waiting screen or
+# MODE_METER, any line with "raw" and 8 numbers) and paste them under a new header.
+# The first word of the header says where the bar was, and so what the robot must do:
+#   [white ...]     the whole bar on white            (must not start)
+#   [black ...]     the whole bar on black            (must not start; a crossing)
+#   [middle ...]    the line under the middle, A3/A4  (must start after 0.2 s)
+#   [lifted ...]    the robot held up in the air      (must not start)
+#   [crossing ...]  the bar across a crossing         (must not start; a crossing)
+# After the first word you can write anything, for example [white under the lamp].
+# Lines starting with # are notes. Then run: bash sim/replay_test.sh
+
+[black: the whole bar on black]
+# (the first line the student sent, at 14:53:35.007, was garbled on the cable, "6?SJ" in
+# place of A2: left out)
+14:53:35.986 ->   bar 11111111  raw 970 971 965 965 966 976 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:36.988 ->   bar 11111111  raw 970 971 965 966 966 976 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:37.990 ->   bar 11111111  raw 971 971 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:38.991 ->   bar 11111111  raw 970 971 965 966 967 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:40.018 ->   bar 11111111  raw 970 972 964 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:41.011 ->   bar 11111111  raw 970 971 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:41.997 ->   bar 11111111  raw 970 972 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:43.039 ->   bar 11111111  raw 971 972 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:44.000 ->   bar 11111111  raw 971 972 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+14:53:45.002 ->   bar 11111111  raw 970 971 965 966 966 975 971 971  on a crossing, or lifted: put the WHEELS over C1
+
+[white: the whole bar on white]
+14:54:40.141 ->   bar 00000000  raw 203 158 74 77 72 96 99 99  no line in the middle: put the bar on MID
+14:54:41.156 ->   bar 00000000  raw 202 159 73 77 72 96 98 99  no line in the middle: put the bar on MID
+14:54:42.169 ->   bar 00000000  raw 202 159 74 77 72 97 98 99  no line in the middle: put the bar on MID
+14:54:43.150 ->   bar 00000000  raw 202 159 74 77 72 97 99 99  no line in the middle: put the bar on MID
+14:54:44.164 ->   bar 00000000  raw 201 158 74 77 72 97 98 99  no line in the middle: put the bar on MID
+14:54:45.128 ->   bar 00000000  raw 200 157 74 77 72 97 98 98  no line in the middle: put the bar on MID
+14:54:46.131 ->   bar 00000000  raw 200 157 74 78 72 97 98 98  no line in the middle: put the bar on MID
+14:54:47.156 ->   bar 00000000  raw 200 157 74 77 72 98 98 98  no line in the middle: put the bar on MID
+14:54:48.168 ->   bar 00000000  raw 201 158 74 78 72 98 99 98  no line in the middle: put the bar on MID
+14:54:49.137 ->   bar 00000000  raw 200 158 74 78 72 98 98 98  no line in the middle: put the bar on MID
+
+[middle: the black line under the middle of the bar]
+14:55:59.306 ->   bar 11100111  raw 327 212 154 876 898 287 196 263  on a crossing, or lifted: put the WHEELS over C1
+14:56:00.289 ->   bar 11100111  raw 328 214 155 876 900 287 199 266  on a crossing, or lifted: put the WHEELS over C1
+14:56:01.318 ->   bar 11100111  raw 328 215 155 878 899 288 199 266  on a crossing, or lifted: put the WHEELS over C1
+14:56:02.298 ->   bar 11100111  raw 329 215 156 879 897 294 201 267  on a crossing, or lifted: put the WHEELS over C1
+14:56:03.312 ->   bar 11100111  raw 329 216 156 879 896 297 203 268  on a crossing, or lifted: put the WHEELS over C1
+14:56:04.280 ->   bar 11100111  raw 329 216 156 879 896 299 203 268  on a crossing, or lifted: put the WHEELS over C1
+14:56:05.302 ->   bar 11100111  raw 329 216 155 879 897 297 202 266  on a crossing, or lifted: put the WHEELS over C1
+14:56:06.318 ->   bar 11100111  raw 328 216 156 880 897 301 204 268  on a crossing, or lifted: put the WHEELS over C1
+14:56:07.316 ->   bar 11100111  raw 328 216 156 880 895 305 205 269  on a crossing, or lifted: put the WHEELS over C1
+14:56:08.328 ->   bar 11100111  raw 328 217 157 880 894 307 205 270  on a crossing, or lifted: put the WHEELS over C1
+
+[lifted: the robot lifted off a little]
+# (read as it was raised higher and higher, then put down: the next part)
+14:59:18.529 ->   bar 11111111  raw 901 877 842 866 852 847 876 906  on a crossing, or lifted: put the WHEELS over C1
+14:59:19.533 ->   bar 11111111  raw 888 861 824 849 834 828 860 893  on a crossing, or lifted: put the WHEELS over C1
+14:59:20.533 ->   bar 11111111  raw 875 846 806 833 815 810 843 879  on a crossing, or lifted: put the WHEELS over C1
+14:59:21.579 ->   bar 11111111  raw 861 825 785 812 793 788 821 863  on a crossing, or lifted: put the WHEELS over C1
+14:59:22.562 ->   bar 11111111  raw 821 777 732 763 738 735 768 818  on a crossing, or lifted: put the WHEELS over C1
+14:59:23.539 ->   bar 11111111  raw 804 758 711 744 716 713 747 800  on a crossing, or lifted: put the WHEELS over C1
+14:59:24.548 ->   bar 11111111  raw 777 727 676 711 679 677 711 767  on a crossing, or lifted: put the WHEELS over C1
+
+[white: put down again after the lifted part]
+# (the last line of this part was cut off after the numbers)
+14:59:25.569 ->   bar 00000000  raw 90 74 67 73 68 69 71 73  no line in the middle: put the bar on MID
+14:59:26.555 ->   bar 00000000  raw 86 74 67 73 68 69 71 73  no line in the middle: put the bar on MID
+14:59:27.588 ->   bar 00000000  raw 85 73 67 72 68 69 71 72  no line in the middle: put the bar on MID
+14:59:28.556 ->   bar 00000000  raw 84 73 67 72 68 69 71 72  no line in the mi
+
+[white: sent as "the line cross from the right to left"]
+# (every sensor reads white here, 66 to 76: no line was under the bar, so this is white.
+# A printout with the bar ON a crossing is still missing: please send one.)
+15:03:11.325 ->   bar 00000000  raw 75 72 66 70 68 69 72 75  no line in the middle: put the bar on MID
+15:03:12.305 ->   bar 00000000  raw 75 72 66 70 68 70 72 75  no line in the middle: put the bar on MID
+15:03:13.336 ->   bar 00000000  raw 75 72 66 70 67 69 72 75  no line in the middle: put the bar on MID
+15:03:14.316 ->   bar 00000000  raw 75 72 66 70 68 69 72 75  no line in the middle: put the bar on MID
+15:03:15.290 ->   bar 00000000  raw 76 72 66 70 68 69 72 75  no line in the middle: put the bar on MID
+15:03:16.310 ->   bar 00000000  raw 76 72 66 70 68 69 72 75  no line in the middle: put the bar on MID
+15:03:17.325 ->   bar 00000000  raw 76 72 66 70 68 69 72 75  no line in the middle: put the bar on MID

@@ -2,9 +2,9 @@
  *  calibrationMode.h: automatic calibration, sensor meter, motor check
  * =====================================================================
  *
- *  Only used when ROBOT_MODE in calibration.h is not MODE_MISSION.
+ *  Only in e33_calibrate (the mission is the other program).
  *
- *  MODE_CALIBRATE  (about 90 s, nothing to press)
+ *  MODE_CALIBRATE  (about a minute, nothing to press)
  *    Place the robot exactly as for the mission: wheels (axle) over the C1
  *    line, on the MID line, facing east. Switch on and step back. When the
  *    bar has seen the line steadily for 3 s the robot:
@@ -31,7 +31,8 @@
  *    on the field.
  *
  *  MODE_METER        prints what the sensors see; never moves
- *  MODE_MOTOR_CHECK  wheels OFF the ground: runs each motor in turn
+ *  MODE_MOTOR_CHECK  wheels OFF the ground: runs each motor in turn, only
+ *                    while the robot is lifted (waitLifted)
  * ===================================================================== */
 #ifndef CALIBRATIONMODE_H
 #define CALIBRATIONMODE_H
@@ -44,6 +45,7 @@ uint16_t newStatus = 0;
 uint8_t  curItem = CI_SENSOR;
 const __FlashStringHelper *calPhase = 0;
 bool     calAborted = false;
+bool     calReprint = false;   /* [E33] the report printed again from EEPROM */
 
 float    burstM[8];   uint8_t nBurst = 0;      /* left/right effort per cell - 1 */
 float    kMove[2];    uint8_t nKMove = 0;     /* cm per (speed unit x s) */
@@ -75,6 +77,13 @@ void printF1(float v, uint8_t d){
   }
 }
 
+/* [E33] a label and the number after it: one call instead of two, which
+ * saves flash in every place that prints one */
+void pNum(const __FlashStringHelper *k, long v){ Serial.print(k); Serial.print(v); }
+
+/* [E33] v rounded to a whole number (v >= 0); one copy of the float code */
+__attribute__((noinline)) uint16_t roundU(float v){ return (uint16_t)(v + 0.5); }
+
 /* ------------------------------------------------------------------ */
 /*  1. Standing still: is there ONE line under the middle of the bar?  */
 /* ------------------------------------------------------------------ */
@@ -86,20 +95,28 @@ void printRaw(const uint16_t *v){
 
 void calReport(bool saved, uint16_t seq, int addr);
 
+/* [E33] Opening the Serial Monitor restarts the Nano, and the report is
+ * printed only once, at the end of the run. So print the saved one again.
+ * (noinline: the saved record then has its own stack frame; inside the long
+ * start-up code every use of it cost extra flash) */
+__attribute__((noinline)) void calReprintSaved(){
+  CalRec s;
+  int slot = calReadEeprom(s);
+  if(slot){
+    CalData keep = cal;
+    cal = s.d; newStatus = s.status;
+    calAborted = s.spare; curItem = s.spare - 1; calPhase = 0;   /* [E33] a run that stopped says so again */
+    calReprint = true;
+    calReport(true, s.seq, slot - 1);
+    calReprint = false;
+    cal = keep; newStatus = 0; calAborted = false;
+  }
+}
+
 void calWaitPlacement(RawLook &r){
   bool needLift = EEPROM.read(CAL_REARM) == 1;
   if(needLift){
-    /* [E33] Opening the Serial Monitor restarts the Nano, and the report is
-     * printed only once, at the end of the run. So print the saved one again. */
-    CalRec s;
-    int slot = calReadEeprom(s);
-    if(slot){
-      CalData keep = cal;
-      cal = s.d; newStatus = s.status;
-      calAborted = s.spare; curItem = s.spare - 1; calPhase = 0;   /* [E33] a run that stopped says so again */
-      calReport(true, s.seq, slot - 1);
-      cal = keep; newStatus = 0; calAborted = false;
-    }
+    calReprintSaved();
     Serial.println(F("\nTo calibrate again: lift the robot, then put it at the start."));
   }
   else Serial.println(F("Put the robot at the start: wheels over C1, on MID, facing east. Then step back."));
@@ -127,6 +144,8 @@ void calWaitPlacement(RawLook &r){
         Serial.print(F("waiting: raw A0..A7: ")); printRaw(r.v);
         Serial.print(F(" biggest step ")); Serial.print(r.gap);
         Serial.println(F(" (need one line under the middle, 1-3 channels)"));
+        if(r.wrongSide && r.gap > 300)
+          Serial.println(F("  (some channels stand out the OTHER way: is CAL_LINE_LOW right? MODE_SENSOR_CHECK tells)"));
       }
     }
   }
@@ -193,7 +212,10 @@ uint8_t rampWheel(uint8_t side, int8_t dir, int8_t expect){
 
 void calAbortWhy(const __FlashStringHelper *why);
 
-void measureDeadband(){
+/* ([E33] noinline here and on measureSensors(): their arrays then have their
+ * own stack frames, not one large frame for the whole calibration, which
+ * saves flash) */
+__attribute__((noinline)) void measureDeadband(){
   calPhase = F("dead band"); curItem = CI_DEADBD;
   Serial.println(F("step 2: dead band (one wheel at a time, very slowly)"));
   /* left forward turns the robot right about the braked right wheel, so the
@@ -270,7 +292,7 @@ bool sweepTo(int dir, bool untilCentre, uint16_t *mn, uint16_t *mx){
 
 void sweepLost(){ calAbortWhy(F("the sensor sweep lost the line")); }
 
-void measureSensors(){
+__attribute__((noinline)) void measureSensors(){
   calPhase = F("sensor sweep"); curItem = CI_SENSOR;
   Serial.println(F("step 3: sensor sweep (swinging the bar over the line)"));
   uint16_t mn[8], mx[8];
@@ -327,8 +349,8 @@ void endCell(){
   float ratio = (trimRf / trimLf) * (1 + 0.8 * (r - 1));
   if(ratio <= 1){ trimLf = 1000; trimRf = 1000 * ratio; }
   else          { trimRf = 1000; trimLf = 1000 / ratio; }
-  cal.trimL = (uint16_t)(trimLf + 0.5);
-  cal.trimR = (uint16_t)(trimRf + 0.5);
+  cal.trimL = roundU(trimLf);
+  cal.trimR = roundU(trimRf);
 }
 
 struct LegRes { uint8_t n; float uE[3]; float uStart; };   /* uE < 0: a crossing not seen */
@@ -347,7 +369,7 @@ void runLeg(bool fixedSpeed, int speed, bool loose, LegRes &L, bool firstCell = 
   float d0 = CELL_CM - SENSOR_AHEAD_CM + TAPE_W_CM / 2;
   float lastU = L.uStart, lastGap = d0;                  /* last crossing seen, and how far the next is */
   while(true){
-    if(millis() - tStart > 20000) calAbortWhy(F("a leg took more than 20 s (motors switched on?)"));
+    if(millis() - tStart > 20000UL * (L.n + 1)) calAbortWhy(F("no crossing for 20 s (motors switched on?)"));
     /* [E33] leg 1 steers with steerAt(), which drives straight on with no
      * line. Placed a cell off or facing west it would leave the field */
     if(fixedSpeed && millis() - tLineSeen > 1000) calAbortWhy(F("line lost: was it at the start, facing east?"));
@@ -368,7 +390,7 @@ void runLeg(bool fixedSpeed, int speed, bool loose, LegRes &L, bool firstCell = 
       bool missed = false;
       /* the first crossing of a leg includes getting up to speed from rest,
        * so it may come later on the odometer than the distance says */
-      if(r > (loose ? 3.0 : (L.n == 0 ? 2.2 : 1.6))){
+      if(r > (loose ? (L.n == 0 ? 12.0 : 3.0) : (L.n == 0 ? 2.2 : 1.6))){
         Serial.print(F("  crossing ")); Serial.print(L.n + 1);
         Serial.print(F(" at ")); printF1(r, 2); Serial.println(F(" x the expected distance"));
         /* [E33] about one cell too far between two crossings: one was
@@ -379,6 +401,10 @@ void runLeg(bool fixedSpeed, int speed, bool loose, LegRes &L, bool firstCell = 
         L.uE[L.n++] = -1;
         missed = true;
       }
+      /* [E33] a slow robot: the first crossing of leg 1 came far later than the
+       * default speed says. Take the robot's rough speed from it, so the next
+       * two are checked against this robot and not the default */
+      if(loose && L.n == 0 && r > 1.5) kEst /= r;
       L.uE[L.n] = odoU;
       edgeOdo = odoCm;
       if(!missed && (L.n >= 1 || firstCell)) endCell();   /* a whole cell, crossing to crossing */
@@ -439,14 +465,20 @@ bool spinMeasure(int dir, uint16_t &t90){
   return true;
 }
 
+/* revL and revR scaled so their mean is 1 ([E33] one copy: less flash) */
+__attribute__((noinline)) void normRev(){
+  float mean = (revL + revR) / 2;
+  revL /= mean; revR /= mean;
+}
+
 /* Backward trims = forward trims x revL / revR, the stronger side scaled
  * so neither goes above 1000. */
 void applyReverseTrims(){
   float l = trimLf * revL, r = trimRf * revR;
   float top = (l > r) ? l : r;
   if(top > 1000){ l = l * 1000 / top; r = r * 1000 / top; }
-  cal.trimLr = (uint16_t)(l + 0.5);
-  cal.trimRr = (uint16_t)(r + 0.5);
+  cal.trimLr = roundU(l);
+  cal.trimRr = roundU(r);
 }
 
 /* After one spin each way: a spin LEFT uses left-backward + right-forward,
@@ -463,8 +495,7 @@ void matchSpins(){
   if(x < -0.3) x = -0.3;
   revL *= (1 - 0.8 * x);
   revR *= (1 + 0.8 * x);
-  float mean = (revL + revR) / 2;
-  revL /= mean; revR /= mean;
+  normRev();
   applyReverseTrims();
   Serial.print(F("  spin match: left/right difference ")); printF1(x * 100, 1);
   Serial.print(F("%  -> backward trims left ")); Serial.print(cal.trimLr);
@@ -502,15 +533,21 @@ float spreadOf(float *a, uint8_t n){
   return md > 0 ? (hi - lo) / md : 1;
 }
 
-void addCruise(LegRes &L){
+/* The two whole cells of a leg: cm per (speed unit x s) of each, added to
+ * k[] (up to max). [E33] one copy for leg 1 and the fast legs: less flash. */
+__attribute__((noinline)) void addCells(const LegRes &L, float *k, uint8_t &n, uint8_t max){
   for(uint8_t i=1;i<3;i++){
     if(L.uE[i] < 0 || L.uE[i-1] < 0) continue;            /* a crossing was missed there */
     float du = L.uE[i] - L.uE[i-1];
-    if(du > 0 && nKCruise < 6) kCruise[nKCruise++] = CELL_CM / du;
+    if(du > 0 && n < max) k[n++] = CELL_CM / du;
   }
+}
+
+void addCruise(LegRes &L){
+  addCells(L, kCruise, nKCruise, 6);
   if(nKCruise == 0) return;
   float k = median(kCruise, nKCruise);
-  cal.vCruise100 = (uint16_t)(k * MAX_SP * 100 + 0.5);
+  cal.vCruise100 = roundU(k * MAX_SP * 100);
   kEst = k;
 }
 
@@ -549,12 +586,34 @@ void calEvaluate(){
 }
 
 bool calSave(uint16_t &seqOut, int &addrOut){
-  CalRec old;
-  int slot = calReadEeprom(old);
+  /* [E33] one record on the stack, first the last saved one (old), then the
+   * new one (r) in the same place: three records made a stack frame too
+   * large to reach cheaply, which cost a lot of flash */
   CalRec r;
+  CalRec &old = r;
+  int slot = calReadEeprom(old);
+  /* [E33] A run that stopped part way (placed wrong, motors switched off, a
+   * flat battery) must not wipe what the last calibration measured well:
+   * whatever it measured before it stopped is suspect too (with the motors
+   * off, the dead band "passed" at duty 160 and more), so the last good
+   * calibration is kept. A run that finished replaces only what it measured
+   * well. Only when the last one was made at the same speeds and with the
+   * same black/white polarity. */
+  if(slot && old.maxSp == MAX_SP && old.moveSp == MOVE_SP && old.turnSp == TURN_SP){
+    bool kept = false;
+    for(uint8_t k=0;k<CI_COUNT;k++){
+      uint8_t sn = calItem(newStatus, k), so = calItem(old.status, k);
+      bool newOk = !calAborted && (sn == ST_PASS || sn == ST_WEAK);
+      bool oldOk = (so == ST_PASS) || (so == ST_WEAK);
+      if(k == CI_SENSOR && old.d.lineLow != CAL_LINE_LOW) oldOk = false;
+      if(!newOk && oldOk){ calCopyItem(cal, old.d, k); setStatus(k, so); kept = true; }
+    }
+    if(kept) Serial.println(F("(the rest is kept from the last calibration)"));
+  }
+  uint16_t seq = slot ? (uint16_t)(old.seq + 1) : 1;   /* (before r replaces old) */
   memset(&r, 0, sizeof(r));
   r.magic = CAL_MAGIC; r.version = CAL_VERSION; r.size = sizeof(CalRec);
-  r.seq = slot ? (uint16_t)(old.seq + 1) : 1;
+  r.seq = seq;
   r.status = newStatus;
   r.spare = calAborted ? curItem + 1 : 0;   /* [E33] which step stopped it, for the report printed again later */
   r.maxSp = MAX_SP; r.moveSp = MOVE_SP; r.turnSp = TURN_SP;
@@ -563,11 +622,12 @@ bool calSave(uint16_t &seqOut, int &addrOut){
   r.fletcher = fletcher16((const uint8_t*)&r, sizeof(CalRec) - 2);
   int addr = (slot == CAL_SLOT_A + 1) ? CAL_SLOT_B : CAL_SLOT_A;   /* never overwrite the newest */
   EEPROM.put(addr, r);
-  CalRec chk;
-  EEPROM.get(addr, chk);
+  /* read it back: every byte the same as written? */
+  bool same = true;
+  for(uint8_t i=0;i<sizeof(CalRec);i++) if(EEPROM.read(addr + i) != ((const uint8_t*)&r)[i]) same = false;
   seqOut = r.seq; addrOut = addr;
   cal.fromRun = r.seq;
-  return memcmp(&chk, &r, sizeof(CalRec)) == 0;
+  return same;
 }
 
 uint16_t rawOf(uint16_t v){ return cal.lineLow ? (uint16_t)(1023 - v) : v; }
@@ -577,7 +637,6 @@ void pStat(uint8_t item){
   Serial.println();
   printItemName(item); Serial.print(F(" [")); printItemStatus(calItem(newStatus, item)); Serial.print(F("] "));
 }
-void pNum(const __FlashStringHelper *k, long v){ Serial.print(k); Serial.print(v); }
 void pPct(float x){ Serial.print(' '); printF1(x * 100, 1); Serial.print('%'); }
 void pDef(const __FlashStringHelper *k, long v){
   Serial.print(F("#define CAL_")); Serial.print(k); Serial.print(' '); Serial.println(v);
@@ -587,10 +646,22 @@ void pArr(const __FlashStringHelper *k, const uint16_t *v){
   for(uint8_t i=0;i<8;i++){ Serial.print(rawOf(v[i])); Serial.print(i < 7 ? F(", ") : F(" }\n")); }
 }
 
+/* [E33] The names of the CAL VALUES from DEAD_MASK to T90_R_MS, one after
+ * the other, in the order of CalData (deadMask and the four dead bands are
+ * bytes, then nine words): calReport() prints them in one loop, which takes
+ * much less flash than one call for each. */
+const char calDefNames[] PROGMEM = "DEAD_MASK\0DB_LF\0DB_LR\0DB_RF\0DB_RR\0TRIM_L\0TRIM_R\0TRIM_LR\0TRIM_RR\0"
+                                   "V_CRUISE_X100\0V_MOVE_X100\0LAG_MOVE_MS\0T90_L_MS\0T90_R_MS";
+static_assert(offsetof(CalData, dbRr) - offsetof(CalData, deadMask) == 4 &&
+              offsetof(CalData, trimL) - offsetof(CalData, deadMask) == 5 &&
+              offsetof(CalData, t90R) - offsetof(CalData, trimL) == 8 * sizeof(uint16_t),
+              "calDefNames must follow the order of the values in CalData");
+
 void calReport(bool saved, uint16_t seq, int addr){
   Serial.print(F("\n=== CALIBRATION REPORT run #")); Serial.print(seq);
   if(calAborted){ Serial.print(F("   STOPPED during ")); if(calPhase) Serial.print(calPhase); else printItemName(curItem); }
   Serial.print(F("\n(anything not PASS or WEAK: the mission uses the default for it)"));
+  if(calReprint) Serial.print(F("\n(from EEPROM: the measured lists are only in the printout at the end of the run)"));
 
   /* sensors: weakest channel, unusable ones, and a slide-style single number */
   pStat(CI_SENSOR);
@@ -610,9 +681,14 @@ void calReport(bool saved, uint16_t seq, int addr){
   pNum(F(", right fwd "), cal.dbRf); pNum(F(" back "), cal.dbRr);
 
   pStat(CI_TRIM);
-  if(cal.trimR < cal.trimL)      pNum(F("RIGHT motor stronger by "), (long)(100.0 * cal.trimL / cal.trimR - 99.5));
-  else if(cal.trimL < cal.trimR) pNum(F("LEFT motor stronger by "), (long)(100.0 * cal.trimR / cal.trimL - 99.5));
-  if(cal.trimL != cal.trimR) Serial.print('%');
+  if(cal.trimL != cal.trimR){
+    /* [E33] (one line for both sides: less flash) */
+    bool right = cal.trimR < cal.trimL;        /* the right one was turned down */
+    uint16_t hi = right ? cal.trimL : cal.trimR, lo = right ? cal.trimR : cal.trimL;
+    Serial.print(right ? F("RIGHT") : F("LEFT"));
+    pNum(F(" motor stronger by "), (long)(100.0 * hi / lo - 99.5));
+    Serial.print('%');
+  }
   Serial.print(F(" (turned down to match). left/right effort in each cell, 0 = straight:"));
   for(uint8_t i=0;i<nBurst;i++) pPct(burstM[i]);
 
@@ -623,7 +699,14 @@ void calReport(bool saved, uint16_t seq, int addr){
   pStat(CI_MOVE);
   pNum(F("cm/s x100 at MOVE_SP: "), cal.vMove100); pNum(F(", start-up ms: "), cal.lagMove);
   pStat(CI_CRUISE);
-  pNum(F("cm/s x100 at MAX_SP: "), cal.vCruise100); pNum(F(", cells measured: "), nKCruise);
+  pNum(F("cm/s x100 at MAX_SP: "), cal.vCruise100);
+  if(!calReprint) pNum(F(", cells measured: "), nKCruise);
+  /* [E33] strong motors: above about 30 cm/s the robot loses the line */
+  if(cal.vCruise100 > 3000){
+    Serial.println();
+    Serial.print(F("FAST ROBOT: set MAX_SP MOVE_SP TURN_SP TURN_SLOW_SP SP_START to about "));
+    Serial.print(220000UL / cal.vCruise100); Serial.print(F("% of now, calibrate again"));
+  }
   pStat(CI_TURN);
   Serial.print(F("ms per 90 degrees, left:"));
   for(uint8_t i=0;i<nT90L;i++) pNum(F(" "), t90Ls[i]);
@@ -633,28 +716,24 @@ void calReport(bool saved, uint16_t seq, int addr){
   pNum(F("\n\nsaved in EEPROM at "), addr);
   Serial.println(saved ? F(", read back OK") : F(", READ BACK FAILED"));
   Serial.println(calAborted ? F("(not finished: do not paste these)")
-                            : F("To freeze these values: paste over CAL VALUES in calibration.h, set CAL_USE_EEPROM 0"));
+                            : F("Optional: paste this block over the CAL VALUES of calibration.h and set CAL_USE_EEPROM 0"));
   pDef(F("VALUES_FROM_RUN"), seq);
   pDef(F("LINE_LOW"), cal.lineLow);
   pArr(F("LO"), cal.lo);
   pArr(F("HI"), cal.hi);
-  pDef(F("DEAD_MASK"), cal.deadMask);
-  pDef(F("DB_LF"), cal.dbLf);
-  pDef(F("DB_LR"), cal.dbLr);
-  pDef(F("DB_RF"), cal.dbRf);
-  pDef(F("DB_RR"), cal.dbRr);
-  pDef(F("TRIM_L"), cal.trimL);
-  pDef(F("TRIM_R"), cal.trimR);
-  pDef(F("TRIM_LR"), cal.trimLr);
-  pDef(F("TRIM_RR"), cal.trimRr);
-  pDef(F("V_CRUISE_X100"), cal.vCruise100);
-  pDef(F("V_MOVE_X100"), cal.vMove100);
-  pDef(F("LAG_MOVE_MS"), cal.lagMove);
-  pDef(F("T90_L_MS"), cal.t90L);
-  pDef(F("T90_R_MS"), cal.t90R);
+  /* DEAD_MASK to T90_R_MS: one loop over the names, in CalData's order */
+  const char *nm = calDefNames;
+  for(uint8_t i=0;i<14;i++){
+    long v = (i < 5) ? (long)((const uint8_t*)&cal)[offsetof(CalData, deadMask) + i] : (long)(&cal.trimL)[i - 5];
+    pDef((const __FlashStringHelper*)nm, v);
+    while(pgm_read_byte(nm++)) ;                /* on to the next name */
+  }
   Serial.println(F("/* ---- end CAL VALUES ---- */"));
+#if !CAL_USE_EEPROM
+  Serial.println(F("NOTE: CAL_USE_EEPROM is 0: e33_mission ignores this calibration. Paste the block above, or set it to 1."));
+#endif
   Serial.println(calAborted ? F("NOT FINISHED: fix the problem (README: When the calibration stops), then calibrate again.")
-                            : F("Done. Set ROBOT_MODE to MODE_MISSION in calibration.h and upload."));
+                            : F("Done. Now upload e33_mission."));
 }
 
 void calFinish(){
@@ -686,13 +765,31 @@ void calFaultHook(uint8_t code, const __FlashStringHelper *why){
   calAbortWhy(why);
 }
 
+/* The end of a leg: the wheels onto the crossing, then the spin (left at C4,
+ * right at C1); after the spin right, the second of a pair, match the
+ * backward trims. [E33] one copy for the four legs: less flash. */
+__attribute__((noinline)) void legEnd(int dir){
+  rollToBarPast(SENSOR_AHEAD_CM);
+  spinAt(dir, dir > 0 ? F("spin at C1 (right)") : F("spin at C4 (left)"));
+  if(dir > 0) matchSpins();
+}
+
+/* Legs 2, 3 and 4: MID at MAX_SP, the cruise speed measured on the way. */
+__attribute__((noinline)) void cruiseLeg(const __FlashStringHelper *phase, int dir){
+  calPhase = phase; curItem = CI_CRUISE;
+  LegRes L;
+  runLeg(false, MAX_SP, false, L);
+  addCruise(L);
+  legEnd(dir);
+}
+
 void runCalibration(){
   faultHook = calFaultHook;
   Serial.println(F("=== AUTOMATIC CALIBRATION ==="));
   trimLf = cal.trimL; trimRf = cal.trimR;
   revL = (float)cal.trimLr / (cal.trimL ? cal.trimL : 1000);
   revR = (float)cal.trimRr / (cal.trimR ? cal.trimR : 1000);
-  { float m = (revL + revR) / 2; revL /= m; revR /= m; }
+  normRev();
   kEst = (cal.vMove100 / 100.0) / MOVE_SP;
   vScale = 1.0;
   newStatus = 0;
@@ -721,11 +818,7 @@ void runCalibration(){
   calPhase = F("leg 1: C1 to C4 at MOVE_SP"); curItem = CI_MOVE;
   Serial.println(F("step 4: driving (leg 1, slow)"));
   runLeg(true, MOVE_SP, true, L, true);
-  for(uint8_t i=1;i<3;i++){
-    if(L.uE[i] < 0 || L.uE[i-1] < 0) continue;
-    float du = L.uE[i] - L.uE[i-1];
-    if(du > 0 && nKMove < 2) kMove[nKMove++] = CELL_CM / du;
-  }
+  addCells(L, kMove, nKMove, 2);
   if(nKMove == 2){
     float k = (kMove[0] + kMove[1]) / 2;
     float d0 = CELL_CM - SENSOR_AHEAD_CM + TAPE_W_CM / 2;
@@ -735,34 +828,17 @@ void runCalibration(){
     if(lag > 400) lag = 400;
     lagMs = lag;
     kEst = k;
-    cal.vMove100   = (uint16_t)(k * MOVE_SP * 100 + 0.5);
-    cal.vCruise100 = (uint16_t)(k * MAX_SP * 100 + 0.5);   /* until measured */
+    cal.vMove100   = roundU(k * MOVE_SP * 100);
+    cal.vCruise100 = roundU(k * MAX_SP * 100);   /* until measured */
     cal.lagMove    = lag;
     float s = fabs(kMove[0] - kMove[1]) / k;
     setStatus(CI_MOVE, s <= 0.08 ? ST_PASS : (s <= 0.15 ? ST_WEAK : ST_FAIL));
   }
-  rollToBarPast(SENSOR_AHEAD_CM);
-  spinAt(-1, F("spin at C4 (left)"));
+  legEnd(-1);
 
-  calPhase = F("leg 2: C4 to C1 at MAX_SP"); curItem = CI_CRUISE;
-  runLeg(false, MAX_SP, false, L);
-  addCruise(L);
-  rollToBarPast(SENSOR_AHEAD_CM);
-  spinAt(+1, F("spin at C1 (right)"));
-  matchSpins();
-
-  calPhase = F("leg 3: C1 to C4 at MAX_SP"); curItem = CI_CRUISE;
-  runLeg(false, MAX_SP, false, L);
-  addCruise(L);
-  rollToBarPast(SENSOR_AHEAD_CM);
-  spinAt(-1, F("spin at C4 (left)"));
-
-  calPhase = F("leg 4: C4 to C1 at MAX_SP"); curItem = CI_CRUISE;
-  runLeg(false, MAX_SP, false, L);
-  addCruise(L);
-  rollToBarPast(SENSOR_AHEAD_CM);
-  spinAt(+1, F("spin at C1 (right)"));
-  matchSpins();
+  cruiseLeg(F("leg 2: C4 to C1 at MAX_SP"), +1);
+  cruiseLeg(F("leg 3: C1 to C4 at MAX_SP"), -1);
+  cruiseLeg(F("leg 4: C4 to C1 at MAX_SP"), +1);
 
   calPhase = F("finished");
   calFinish();
@@ -774,7 +850,8 @@ void runCalibration(){
 void runMeter(){
   digitalWrite(STBY, 0);
   Serial.println(F("SENSOR METER: the robot never moves in this mode."));
-  Serial.println(F("Slide the robot over white, over the line, over a crossing."));
+  Serial.println(F("Slide the robot over white, over the line, over a crossing (10 lines a second;"));
+  Serial.println(F("every 3 s the lowest and highest each sensor read, so a line passing fast still shows)."));
   uint16_t mn[8], mx[8];
   for(uint8_t i=0;i<8;i++){ mn[i] = 1023; mx[i] = 0; }
   uint8_t line = 0;
@@ -794,12 +871,12 @@ void runMeter(){
     Serial.print(F(" | line at ")); if(c < 0) Serial.print(F("-")); else printF1(c / 256.0, 2);
     if(checkGrid()) Serial.print(F(" | CROSSING"));
     Serial.println();
-    if(++line >= 20){
+    if(++line >= 30){
       line = 0;
       Serial.print(F("lowest so far  ")); printRaw(mn); Serial.println();
       Serial.print(F("highest so far ")); printRaw(mx); Serial.println();
     }
-    delay(300);
+    delay(100);
   }
 }
 
@@ -816,7 +893,7 @@ void motorStep(const __FlashStringHelper *what, int uL, int uR){
 
 void rampRaw(uint8_t side){
   Serial.print(side ? F("RIGHT") : F("LEFT"));
-  Serial.println(F(" wheel, raw duty going up: note the number where it starts turning:"));
+  Serial.println(F(" wheel, raw duty going up: the number where it starts turning (nothing to write: the calibration measures it):"));
   for(uint16_t d=0; d<=160; d+=5){
     motorRaw(side, 1, (uint8_t)d);
     Serial.print(d); Serial.print(' ');
@@ -827,20 +904,36 @@ void rampRaw(uint8_t side){
   delay(1000);
 }
 
+/* [E33] only with the wheels off the ground: lifted, nothing reflects the
+ * sensors' light and (nearly) all 8 read black. On the floor the motor check
+ * would drive off. */
+void waitLifted(){
+  unsigned long tOk = 0, tPrint = 0;
+  while(true){
+    unsigned long now = millis();
+    if(popcount8(scanBar()) >= 7){ if(!tOk) tOk = now; if(now - tOk > 1000) return; }
+    else tOk = 0;
+    if(now - tPrint > 2000){ tPrint = now; Serial.println(F("waiting: lift the robot, wheels off the ground (the sensors then read black)")); }
+    digitalWrite(LED_PIN, (now / 250) & 1);
+    delay(5);
+  }
+}
+
 void runMotorCheck(){
   Serial.println(F("MOTOR CHECK: LIFT THE WHEELS OFF THE GROUND. Starting in 3 s."));
   delay(3000);
   while(true){
+    waitLifted();
     motorStep(F("LEFT wheel FORWARD  (as if the robot drives forward)"), MOVE_SP, 0);
     motorStep(F("LEFT wheel BACKWARD"), -MOVE_SP, 0);
     motorStep(F("RIGHT wheel FORWARD"), 0, MOVE_SP);
     motorStep(F("RIGHT wheel BACKWARD"), 0, -MOVE_SP);
-    motorStep(F("BOTH FORWARD at MOVE_SP: with the trim both should turn at the SAME speed"), MOVE_SP, MOVE_SP);
+    motorStep(F("BOTH FORWARD at MOVE_SP: after MODE_CALIBRATE both should turn at the SAME speed"), MOVE_SP, MOVE_SP);
     motorStep(F("BOTH FORWARD at MAX_SP"), MAX_SP, MAX_SP);
     motorStep(F("SPIN RIGHT (left forward, right backward)"), TURN_SP, -TURN_SP);
     rampRaw(0);
     rampRaw(1);
-    Serial.println(F("If a wheel turned the wrong way, set LEFT_REVERSED or RIGHT_REVERSED to 1."));
+    Serial.println(F("If a wheel turned the wrong way, set LEFT_REVERSED or RIGHT_REVERSED to 1 in calibration.h (then copy_settings.bat)."));
     Serial.println(F("If the OTHER wheel turned (right for LEFT), swap the two motor plugs."));
     Serial.println(F("If one never turned: motor switch, battery, STBY wire (D10)."));
     Serial.println(F("Again in 5 s..."));
