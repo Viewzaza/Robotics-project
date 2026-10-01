@@ -1,7 +1,10 @@
 /* =====================================================================
  *  robot_e33_v3.ino: the e33 mission, written the way the slides teach it
  *  (v3 = robot_e33_v2 that does its best: a fault no longer stops it, see
- *  STOP_ON_FAULT in calibration.h)
+ *  STOP_ON_FAULT in calibration.h; a restart in the middle of a run carries
+ *  on from the count it kept, see resumeRun(); no false crossing right
+ *  after a standing start; no waiting on LED signals. README: "What v3 does
+ *  differently")
  * =====================================================================
  *
  *  Same shape as robot10: setup() calls beginFnc(), loop() counts crossings
@@ -134,6 +137,7 @@ bool keep_item(String direction);
 bool place_item(String direction);
 void startMission();
 void finishMission();
+void resumeRun();
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -162,6 +166,8 @@ void loop() {
    * with the bar resting on the BOT line, countGrid() would ride over it
    * with the gripper open and push object 2 off x2 */
   if(numGride < N_DONE) numGride = countGrid(numGride);
+  /* [E33] v3: keep the count where a restart finds it (see resumeRun) */
+  if(numGride != keep.n || keep.step != KS_DRIVE) keepStep(KS_DRIVE);
 #if ROUTE_ORDER == 132
   switch(numGride){
 
@@ -238,7 +244,7 @@ void loop() {
  *                             be too short to see
  */
 #if ROUTE_ORDER == 132
-uint8_t caseInfo(int n){
+__attribute__((noinline)) uint8_t caseInfo(int n){   /* (one copy: flash) */
   switch(n){
     case  1: return K_END  | HALF_OK_R;         /* C1 TOP heading north       */
     case  3: return K_TURN | HALF_OK_L;         /* C1 MID heading south       */
@@ -259,7 +265,7 @@ uint8_t caseInfo(int n){
   }
 }
 #else
-uint8_t caseInfo(int n){
+__attribute__((noinline)) uint8_t caseInfo(int n){   /* (one copy: flash) */
   switch(n){
     case  3: return K_TURN | AHEAD_MAY_BLANK;   /* C4 MID heading east        */
     case  5: return K_END  | HALF_OK_L;         /* C4 TOP heading north       */
@@ -304,15 +310,16 @@ int lightCheck(bool known){
   }
   /* white moved by more than a fifth of the white-to-black step: the OFF
    * level sits at 30 % of it (in the simulator a run failed from 31 %) */
-  if((unsigned)abs(d) * 5 > (unsigned)c){
+  /* (v3: the warning only; v2 also flickered the LED for 1 s and waited) */
+  if((unsigned)abs(d) * 5 > (unsigned)c)
     Serial.println(F("WARNING: not the light of the calibration: calibrate here"));
-    /* the LED flickers for 1 s before it drives: seen without the cable */
-    for(uint8_t i=0;i<10;i++){ digitalWrite(LED_PIN, !(i & 1)); delay(100); }
-  }
   return k ? d / k : 0;
 }
 
 void startMission(){
+  /* [E33] v3: restarted in the middle of a run: carry on at once (this run's
+   * record, with the restart in it, is printed when the run ends) */
+  if(resuming){ resumeRun(); return; }
   logPrint();                            /* [E33] the record of the last run, if any */
   /* [E33] after a run that did not finish (a fault, the power cut, a restart)
    * wait 5 s instead of 1.5 s: plugging in USB to read the log restarts the
@@ -378,9 +385,12 @@ void startMission(){
   else          setLeg(CELL_CM);
   clearPid();
   sp = SP_START;
-  int light = lightCheck(sensorsKnown);  /* (before the log's clock starts: it may flicker 1 s) */
-  /* [E33] the supply standing still, before it drives (a low one blinks 3 s) */
+  int light = lightCheck(sensorsKnown);
+  /* [E33] the supply standing still, before it drives */
   bool vLow = powerShow(0, powerRest(), 0);
+  memcpy(keep.lv, &cal, KEEP_LV);        /* [E33] v3: this run's sensor levels, */
+  keep.held = 0;                         /* and the count, for a restart */
+  keepStep(KS_DRIVE);
   runMark = RUN_MARK;                    /* a restart from now on is not a new start */
   logBegin();                            /* [E33] a new run log (it replaces the old one at the first stop) */
   logAdd(LG_START | ((ROUTE_ORDER == 132) ? 0x10 : 0), 0, (int16_t)cal.fromRun,
@@ -391,9 +401,10 @@ void startMission(){
   /* [E33] objects 1, 3, 2: the wheels are on C1 MID with the bar 9.5 cm
    * along MID, just as turn90() leaves them, so turn onto the C1 column
    * where it stands. Object 1 is at the top of C1. */
+  keep.leg = ROW_CM - SENSOR_AHEAD_CM + TAPE_W_CM / 2;
   turnLeft90();
   gridArmed = !checkGrid();
-  setLeg(ROW_CM - SENSOR_AHEAD_CM + TAPE_W_CM / 2);
+  setLeg(keep.leg);
   clearPid();
 #endif
 }
@@ -416,11 +427,13 @@ void turn90(String direction){
     fault(8, F("turn90: no line ahead, this is not a MID crossing"));
   traceEvent(direction == "RIGHT" ? F("turn90 RIGHT") : F("turn90 LEFT"));
   rollToBarPast(SENSOR_AHEAD_CM);          /* wheels onto the crossing */
+  /* next leg: up/down a column if the next action is an end, else along MID
+   * ([E33] v3: worked out before the turn, so a restart in it knows it too) */
+  float gap = (caseKind(numGride + 2) == K_END) ? ROW_CM : CELL_CM;
+  keep.leg = gap - SENSOR_AHEAD_CM + TAPE_W_CM / 2;
   if(direction == "RIGHT"){turnRight90();}
   else{turnLeft90();}
-  /* next leg: up/down a column if the next action is an end, else along MID */
-  float gap = (caseKind(numGride + 2) == K_END) ? ROW_CM : CELL_CM;
-  setLeg(gap - SENSOR_AHEAD_CM + TAPE_W_CM / 2);
+  setLeg(keep.leg);
   clearPid();
 }
 
@@ -458,10 +471,11 @@ void turnAround(const String &direction){   /* [E33] by reference: no copy */
    * the bar got past it; if the line is still under the bar at the start of
    * the spin, spinTurn() counts it as it leaves */
   skip180 = (barPast() > -0.5) ? 1 : 0;
+  /* the bar will be (9.5 - s) back from the end line; MID is ROW_CM from it */
+  keep.leg = ROW_CM + s - SENSOR_AHEAD_CM + TAPE_W_CM / 2;
   if(direction == "RIGHT"){turnRight180();}
   else{turnLeft180();}
-  /* the bar is now (9.5 - s) back from the end line; MID is ROW_CM from it */
-  setLeg(ROW_CM + s - SENSOR_AHEAD_CM + TAPE_W_CM / 2);
+  setLeg(keep.leg);
   clearPid();
 }
 
@@ -471,6 +485,8 @@ void turnAround(const String &direction){   /* [E33] by reference: no copy */
  * the servo moves: a reset while gripping or placing keeps this */
 void rollToAction(float target, uint8_t what){
   rollToBarPast(target);
+  keep.bp = barPast();                   /* [E33] v3: a restart from here does */
+  keepStep(KS_ACTION);                   /* this pick or place again (resumeRun) */
   logAdd(LG_ACTION, numGride, tenths(barPast()), tenths(target), lineMask, what);
   logFlush();
   delay(500);
@@ -515,6 +531,53 @@ bool place_item(String direction){
     put_object();
   }
   return true;
+}
+
+/* =====================================================================
+ *  [E33] v3: CARRY ON AFTER A RESTART
+ *  The battery dipped (a motor or a servo starting) and the Nano restarted
+ *  in the middle of the run. beginFnc() found the count it kept and sent
+ *  the servos the angles they had (a held object stays held). Carry on from
+ *  there, with no start wait:
+ *    - in a pick or a place: do it again from where the servos are
+ *      (the loop calls the same case again: keep_item / place_item);
+ *    - in a turn or a 180: finish it, then as after that turn;
+ *    - on the way to a crossing: follow on and count the next one (the
+ *      distance to it is not known: it is not checked).
+ * ===================================================================== */
+void resumeRun(){
+  memcpy(&cal, keep.lv, KEEP_LV);        /* this run's sensor levels */
+  calApply();
+  vScale = keep.vScale; vSamples = keep.vSamples;
+  numGride = keep.n;                     /* (runMark is still set: beginFnc) */
+  labelInt(F("MISSION: carrying on at n="), numGride);
+  if(keep.held) Serial.print(F(", holding an object"));
+  Serial.println();
+  clearPid();
+  sp = SP_START;
+  gridArmed = !checkGrid();
+  uint8_t kind = caseKind(numGride);
+  if(keep.step == KS_TURN){
+    resumeTurn();
+    setLeg(keep.leg);                    /* the leg the turn was for */
+    /* (the 180 after a place: the arm is up, or was on its way down when
+     * the Nano restarted; either way it must be down before the next pick) */
+    if(!keep.held && armNow != ARM_DOWN) put_object();
+    if(kind != K_PASS) numGride++;       /* as the case does after it (not
+                                          * after route 132's first turn) */
+    clearPid();
+    return;
+  }
+  /* how far the bar is past the crossing just counted: at the action as
+   * kept; on the way to one, about where the robot stops for it */
+  float bp = keep.bp;
+  if(keep.step == KS_DRIVE){
+    bp = (kind == K_END) ? 2.5 : 5.2;
+    setLeg(0);                           /* the next crossing: not checked */
+    vSamples = 0;
+  }
+  edgeOdo = odoCm + TAPE_W_CM / 2 - bp;
+  crossAhead = AH_UNSURE;
 }
 
 void finishMission(){

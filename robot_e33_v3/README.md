@@ -4,6 +4,34 @@
 longer stops the robot and blinks the LED: it prints the fault on Serial, notes it in the run log and goes
 on with the route (see "When it stops by itself" below). Everything else is the same as v2.
 
+### What v3 does differently (from your 19 real runs)
+
+- **A restart in the middle of a run no longer stops the robot.** Your Nano restarted at picks, at
+  places, and in the turn or the 180 right after them (the 9 V battery dips when a servo or a motor
+  starts). v2 then printed `Not driving ... press reset` and blinked fast. v3 keeps, in memory that a
+  restart does not clear, the count (`numGride`), the servo angles, whether an object is held, the speed
+  it measured and the sensor levels of this run. After the restart it sends the servos the same angles
+  before they are attached (a held object stays in the jaws), prints
+  `MISSION: carrying on at n=...` and carries on: a pick or a place is done again from where the servos
+  are, a turn or a 180 is finished, and on the way to a crossing it follows on and counts the next one.
+- **When it does not carry on:** switching on (that memory is lost when the power is off, and a check
+  sum tells), the reset button or plugging in USB (a new start on purpose), and a robot that is lifted
+  when it restarts (the bar sees black everywhere, or no line on the way to a crossing): it prints
+  `Lifted: a new start.` and waits for the normal start. Note: on your Nano a battery dip reports
+  `reset cause: power-on`, exactly like switching on (all your restarts did), so the memory and its check
+  sum, not that flag, tell the two apart.
+- **No false crossing just after a standing start.** While it speeds up from standing (the start, every
+  turn, every 180) your bar read darker for a moment, and it saw a "crossing" 1.4 to 4 cm on, almost every
+  time. After the 180 at C4 TOP the leg back to MID is only 9.7 cm, and v2 counted one at 2.0 cm as C4
+  MID: it turned 7.7 cm early ("it turns 180 again"). v3 ignores a crossing closer than 3.5 cm, or than
+  half the leg, after a standing start (`START_BLIND_CM`, `START_BLIND_FRAC` in `controlLibrary.h`).
+- **No waiting on the LED before it drives:** the light warning (v2 flickered 1 s) and the low supply
+  warning (v2 blinked about 3 s, at the start and after every pick and place) are printed on Serial
+  only, and the robot goes on at once.
+- Kept from v2: the same route, messages and run log, the standing-still measurement of the sensor
+  levels when the default levels miss the line (it is what copes with your loose A0 wire), and your own
+  numbers in the CAL VALUES of `calibration.h`.
+
 Version 2. The first version is kept unchanged in `../robot_e33/` (and in git). Version 2 adds:
 - **MODE_SENSOR_CHECK**: white and black of every sensor, printed as a report you can copy and send;
 - **a run log**: every run is recorded in EEPROM and printed at the next start, so a run without the
@@ -180,23 +208,23 @@ the run log ends with DONE. Use it to practise the first object and its turns ba
 - **Calibrate in the room of the competition** if you can (a practice slot on the field). Sunlight from a
   window or strong lamps change what the sensors read. At every start the robot compares the white under
   the bar with the white of the calibration. More than a fifth of the way to black and it prints
-  `WARNING: not the light of the calibration: calibrate here`, the LED flickers fast for 1 s before it
-  drives, and the run log keeps it as `light=`.
+  `WARNING: not the light of the calibration: calibrate here` (v3: it does not wait for it), and the run
+  log keeps it as `light=`.
   If you cannot calibrate there, at least run `MODE_SENSOR_CHECK` on their field.
 - **Battery.** A fresh one for the calibration and for the run. A 9 V PP3 is weak for motors and servos:
   when the gripper moves it can drop so far that the Nano restarts (a brown-out, see above). 6 x AA or a
   2-cell Li-ion pack (7.4 V) holds up much better. A 470 to 1000 uF capacitor across the servo supply
-  helps too. Bring spares. If the LED blinks long-short-short-short (twice) before it drives or after a
-  pick or a place, the supply is low: change the battery before the next run (see "The battery").
+  helps too. Bring spares. If the Serial Monitor or the run log shows `WARNING: low supply` or a POWER
+  line ending in `LOW`, change the battery before the next run (see "The battery").
 - **Walk the field first**: gaps, loose tape and dirt near the crossings are what worn tape breaks
   most (see "Worn tape"). Repair them before your run.
 - **Put it down** with the wheels exactly over C1, on MID, facing east. It goes 1.5 s after it sees the
   line steadily (LED on), or 5 s after a run that did not finish.
-- **To start again, use the power switch** (off, then on). A reset or plugging in USB during a run looks
-  like a brown-out: the robot stops and blinks fast. Press reset once more (or switch off and on).
+- **To start again, use the power switch** (off, then on), or the reset button: both are a new start
+  (it waits for the line at the start). If the Nano restarts by itself during a run (the battery dipped)
+  it carries on where it was; lift it if you do not want that (see "What v3 does differently").
 - **The LED**: on = line OK, it is about to go. On 0.5 s / off 0.5 s = no good line under the bar. On 1 s /
-  off 1 s = DONE. Short blinks and a pause = a fault, count them (table above). Fast = restarted mid-run.
-  Long-short-short-short, twice, and it goes on = low supply: weak battery.
+  off 1 s = DONE. (With `STOP_ON_FAULT 1`: short blinks and a pause = a fault, count them.)
 - **Bring the USB cable** and a laptop with the Arduino IDE. After a bad run, pick the robot up off the
   lines, plug in and copy the run log (`=== E33 RUN LOG BEGIN` ... `END`): it says what happened.
 
@@ -275,10 +303,9 @@ t=92.6 n=42 POWER end rest=5.00V lowest=4.94V
   (`rest=` against `min=`, one run against the next). To make them exact, see `BANDGAP_MV` in
   `calibration.h`. `?` means the chip gave no usable reading. With only the USB cable (no battery), VCC
   is the USB 5 V after a diode, about 4.4 to 4.8 V, so a low start then is normal.
-- Below `VCC_WARN_MV` (4.5 V) the line ends in `LOW`, it prints
-  `WARNING: low supply: weak battery (README: The battery)` and the LED blinks long, short, short,
-  short, twice (Morse "B" for battery, about 3 s). Then it goes on: this warning never stops the mission.
-  At the start it comes before it drives.
+- Below `VCC_WARN_MV` (4.5 V) the line ends in `LOW` and it prints
+  `WARNING: low supply: weak battery (README: The battery)`. Then it goes on at once (v2 also blinked
+  the LED for about 3 s first): this warning never stops the mission.
 - What to do: a fresh battery. Better, 6 x AA (also 9 V, and much stronger than a PP3) or a 2-cell Li-ion
   pack (7.4 V). A 470 to 1000 uF capacitor across the servo supply, close to the servos, covers the short
   current peaks of a servo starting to move.
@@ -371,13 +398,14 @@ Set `STOP_ON_FAULT` to 1 to make it stop and blink the fault number, as below. T
 | 11 | a 180 took far too long or too short | calibration |
 | 12 | no crossing for far too long: the wheels are not really turning | motor switch, battery, only USB power |
 
-A **brown-out** (the battery could not supply the servos and motors) makes the Nano restart. The old code
-then opened the gripper and drove off as if at the start. Now the robot recognises a restart in the middle of
-a run, prints `RESTARTED IN THE MIDDLE OF A RUN`, blinks fast and does not drive. (The usual Nano bootloader
-wipes the chip's own reset record, so the robot also keeps a mark in memory while the mission runs;
-switching the power off clears it, a restart does not.) Fit a fresh battery, put the robot at the start and
-press reset. A 470 to 1000 uF capacitor across the servo supply also helps. The same happens if you press
-reset or plug in USB during a run: press reset once more to start again.
+A **brown-out** (the battery could not supply the servos and motors) makes the Nano restart. The slides'
+code then opened the gripper and drove off as if at the start; v2 stopped and blinked fast. v3 prints
+`RESTARTED IN THE MIDDLE OF A RUN`, then `MISSION: carrying on at n=...`, and carries on from the count it
+kept, with the servos where they were (see "What v3 does differently"). The run log shows
+`RESTARTED here` at that point, and the record goes on after it. (The robot keeps a mark and the count in
+memory while the mission runs; switching the power off clears it, a restart does not.) Lifted when it
+restarts, or restarted by the reset button or USB, it waits for a new start instead. A fresh battery and a
+470 to 1000 uF capacitor across the servo supply make restarts rarer.
 
 ## When the calibration stops
 
@@ -398,15 +426,12 @@ also says why). Fix the cause, then lift the robot and put it down at the start 
 |---|---|---|
 | on 0.5 s, off 0.5 s | mission, calibrate | waiting: no good line under the middle of the bar |
 | on | mission | line OK: it goes after 1.5 s (5 s after a run that did not finish) |
-| flickers fast for 1 s, then it drives | mission | the light is not the light of the calibration: calibrate there next time |
 | on | calibrate | line seen: starts in 3 s, then stays on while it calibrates |
 | on 0.9 s, off 0.1 s | calibrate | finished and saved: plug in USB to read the report |
 | fast, 5 times a second | calibrate | stopped with a problem: plug in USB to read the report |
 | on 1 s, off 1 s | calibrate | calibrated before: lift it and put it down to calibrate again, or upload `MODE_MISSION` |
 | on 1 s, off 1 s | mission | DONE |
-| 1 to 12 short blinks, then a pause | mission | a fault: see "When it stops by itself" |
-| fast, 5 times a second | mission | restarted in the middle of a run (brown-out, above) |
-| long, short, short, short, twice (about 3 s), then it goes on | mission | low supply: weak battery (see "The battery") |
+| 1 to 12 short blinks, then a pause | mission | a fault, only with `STOP_ON_FAULT 1`: see "When it stops by itself" |
 | 2 times a second | sensor check | waiting for Enter (or 20 s) |
 | 2 times a second | turn check | waiting for Enter (or 30 s) |
 | on 0.5 s, off 0.5 s | turn check | waiting: no good line under the middle of the bar |
@@ -435,6 +460,12 @@ while a servo moves. `--vbat=7.6 --rint=3` gives the warnings (and the mission s
 `--vbat=6.0 --rint=4` browns out at the first pick: the run ends there, and the restart build
 (`-DSIM_RUNMARK=0xE33A55C3UL`) shows what the Nano does next.
 
+**Restarts in the middle of a run (v3).** A simulator with `--reset` (for example
+`--reset=servo:1:300`, `--reset=spin:2:400`, `--reset=n:12:100`, `--resetcause=2` for the reset button)
+restarts the firmware and keeps its memory, as the Nano does. Build it with the memory v3 keeps:
+`-DSIM_NOINIT_VARS='X(runMark) X(keep) X(gripNow) X(armNow)'`. `--lift=0.6` gives the darker bar while
+speeding up from standing.
+
 **Route check.** `PATHCHECK=1 ./sim/e33_test.sh` (and the same with `DEFS="-DROUTE_ORDER=132"`) also
 checks every count of each calibrated mission against the route with `sim/path_check.py`: where the bar
 was at each count, the heading after each turn, each pick and place. A run can put all three objects in
@@ -461,6 +492,19 @@ With calibration, the mission completed in every condition tried, including:
 
 Without calibration it only works when the guesses in `calibration.h` are close to your robot
 (left wheel about 75% of the right). Calibrate once.
+
+**v3, against the v3 before these changes (simulator, uncalibrated, as you run it):**
+- your robot (`--student`, `--student-slow`, `--student-fast`, and the robot fitted to your 19 real runs),
+  both routes, put down 4 cm before to 8 cm past C1: the same result in every case, and the same
+  crossings and turns (the slow robot finishes about 15 s sooner: no LED waits);
+- the 366 hard conditions of the earlier tests: the same result in every one;
+- the darker bar while speeding up from standing (`--lift`, the false crossing your robot saw): from 120
+  to 183 of 192 objects; the fitted robot now always finishes, and the "turns 180 again" of your run 1
+  no longer happens;
+- the Nano restarting at every pick and every place, in every turn and 180 (early, in the middle, late),
+  and on the way to every crossing, both routes, also four restarts in one run and with the darker bar:
+  every run finished with all three objects (the v3 before: it stopped at the first restart). Lifted when
+  it restarts, it does not carry on; restarted by the reset button or USB, it waits for a new start.
 
 ## What is not known yet
 

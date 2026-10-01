@@ -1,5 +1,18 @@
 # robot_countGride  Robot Mission
 
+## Which folder to use (October 2026)
+
+| folder | what it is |
+|---|---|
+| `robot_e33_v3/` | **Use this one.** The working v2 that does its best: a fault does not stop it, it carries on after a battery-dip restart, it ignores the false crossing just after a 180, and `calibration.h` holds this robot's own numbers (no calibration run needed). |
+| `robot_e33_v2/` | The version that worked on the real robot, unchanged. |
+| `robot_e33_emergency/` | The last resort: the original course files with the route cases put in the way the slides do it. |
+| `robot_power_test/` | Moves the servos and motors with the wheels in the air and shows how far the battery voltage drops (why the robot only worked with USB plugged in). |
+| `e33_mission/`, `e33_calibrate/` | The newer two-program version (calibration separate from the mission). Not yet run on the real robot. |
+| `sim/` | The simulator. `sim/real_robot_test.md`: check any version against conditions taken from the real runs. |
+
+The rest of this README describes the older `robot_countGride` work.
+
 Arduino line-following robot with a gripper arm.
 
 **Simulator result: 315 of 315 test conditions complete all three placements.

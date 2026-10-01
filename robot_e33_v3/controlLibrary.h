@@ -369,6 +369,63 @@ void printCalSource(){
 #endif
 #define RUN_MARK 0xE33A55C3UL
 
+/* [E33] v3: what a restart in the middle of a run needs to carry on. It is
+ * in the same kind of memory as runMark (kept through a reset, lost when the
+ * robot is switched off for more than a moment), with a check sum, so a
+ * switch-on never finds it valid by chance. keepSave() writes it at every
+ * count, before every turn and at every pick and place. */
+#if defined(__AVR__)
+  #define NOINIT __attribute__((section(".noinit")))
+#else
+  #define NOINIT                       /* (the simulator keeps these by name) */
+#endif
+#define KS_DRIVE  0                    /* on the way to the next crossing     */
+#define KS_ACTION 1                    /* standing at a column end: the servos move */
+#define KS_TURN   2                    /* spinning (a turn90 or a 180)        */
+#define KEEP_LV   offsetof(CalData, dbLf)
+struct Keep {
+  uint8_t n;                           /* numGride                            */
+  uint8_t step;                        /* KS_DRIVE / KS_ACTION / KS_TURN      */
+  int8_t  dir;                         /* the turn: +1 right, -1 left         */
+  int8_t  left;                        /* lines the spin must still pass      */
+  uint8_t cur;                         /* under the bar: 1 a line to pass, 2 the new road */
+  uint8_t held;                        /* 1 = an object is in the jaws        */
+  float   bp;                          /* the bar past the end line at the action, cm */
+  float   leg;                         /* the leg after the turn it is in     */
+  float   vScale;                      /* the speed this run measured         */
+  uint8_t vSamples;                    /* ... from this many cells            */
+  uint8_t lv[KEEP_LV];                 /* this run's sensor levels (cal.lo, cal.hi,
+                                        * lineLow, deadMask): the ones measured
+                                        * standing still at the start, if it did */
+  uint16_t sum;
+};
+Keep keep NOINIT;
+extern int gripNow, armNow;
+__attribute__((noinline)) uint16_t keepSum(){
+  const uint8_t *p = (const uint8_t *)&keep;
+  uint16_t s = 0x3E33 ^ gripNow ^ (armNow << 8);   /* (the servo angles too) */
+  for(uint8_t i=0;i<offsetof(Keep, sum);i++) s = ((s << 1) | (s >> 15)) ^ p[i];
+  return s;
+}
+__attribute__((noinline)) void keepSave(){ keep.sum = keepSum(); }
+bool keepValid(){ return keep.sum == keepSum(); }   /* (runMark is checked first) */
+float vScale = 1.0;
+uint8_t vSamples = 0;                  /* cells measured during this run */
+/* the count and what the robot is doing now (and this run's speed) */
+__attribute__((noinline)) void keepStep(uint8_t step){
+  keep.n = (uint8_t)numGride; keep.step = step;
+  keep.vScale = vScale; keep.vSamples = vSamples;
+  keepSave();
+}
+/* a spin: its direction, the lines it must still pass, and what is under
+ * the bar (1 a line it is passing, 2 the new road); saved when it changes */
+__attribute__((noinline)) void keepSpin(int8_t dir, int8_t left, uint8_t cur){
+  if(dir == keep.dir && left == keep.left && cur == keep.cur) return;
+  keep.dir = dir; keep.left = left; keep.cur = cur;
+  keepSave();
+}
+bool resuming = false;                 /* [E33] v3: carry on after a restart */
+
 uint8_t resetCause(){
   uint8_t f = resetFlags & 0x0F;
   if(f == 0 && r2HasFlags() && (resetR2 & 0xF0) == 0) f = resetR2;
@@ -447,8 +504,6 @@ float odoCm = 0;
 float odoU = 0;                        /* the same in speed units x seconds (calibration) */
 float odoEffL = 0, odoEffR = 0;        /* speed given to each wheel x seconds (calibration) */
 unsigned long odoLastUs = 0;
-float vScale = 1.0;
-uint8_t vSamples = 0;                  /* cells measured during this run */
 
 #define BRAKE_COAST_MS  40             /* guess: how long the robot rolls after a brake */
 
@@ -474,9 +529,11 @@ void odoTick(){
   if(dt > 200000UL) return;                    /* first call, or a long pause */
   float u2 = (curUL + curUR) * 0.5;
   float s = (float)dt * 1e-6;
+#if ROBOT_MODE != MODE_MISSION          /* [E33] v3: only the calibration reads these */
   odoU += u2 * s;
   odoEffL += curUL * s;
   odoEffR += curUR * s;
+#endif
   int u = (int)u2;
   float d = speedCms(u) * s;
   odoCm += (u >= 0) ? d : -d;
@@ -877,6 +934,8 @@ void steerAt(int s){
 #define CROSS_MAX_MS   1000   /* on a "crossing" longer than this = driving along a line */
 #define MIN_GAP_FRAC   0.45   /* a crossing closer than this share of the expected
                                * distance is a double count or a smudge        */
+#define START_BLIND_CM   3.5  /* [E33] v3: after a standing start, no crossing this near */
+#define START_BLIND_FRAC 0.5  /* ... nor within this share of the leg       */
 #define APPROACH_CM    8.0    /* slow to MOVE_SP this far before a turn or an end */
 #define SETTLE_MS      150
 
@@ -1083,7 +1142,21 @@ int countGrid(int n){
        * (dirt, a piece of tape): not counted either. (The wrong line of
        * CHECK 2 meets its first column late, not early.) */
       bool mark = ((crossMask | cal.deadMask) & 0x81) != 0x81 && crossDist < legGap * (speedKnown ? 0.8 : 0.6);
-      if(mark || crossDist < ((legGap < CELL_CM / 2) ? 1.5 : legGap * (speedKnown ? MIN_GAP_FRAC : 0.3))){
+      float tooNear = legGap * (speedKnown ? MIN_GAP_FRAC : 0.3);
+      /* [E33] v3: after a standing start (the start, every turn, every 180)
+       * the bar reads darker for a moment while the robot speeds up, and your
+       * robot saw a "crossing" 1.4 to 4 cm on almost every time. After the
+       * 180 at C4 TOP the leg back to MID is only 9.7 cm, and v2 (which
+       * there rejected only one closer than 1.5 cm) counted one at 2.0 cm as
+       * C4 MID and turned 7.7 cm early. Now not within START_BLIND_FRAC of a
+       * leg from standing, nor within START_BLIND_CM. (Only a leg from
+       * standing can be shorter than a cell: a leg rolling over a crossing
+       * is always one cell or one row.) */
+      if(!legRolling){
+        tooNear = legGap * START_BLIND_FRAC;
+        if(tooNear < START_BLIND_CM) tooNear = START_BLIND_CM;
+      }
+      if(mark || crossDist < tooNear){
         /* [E33] nothing counted yet: this is C1 (the robot was put down with
          * the bar just before it) or a mark near the start. The distance from
          * the start to C2 is then unknown: legGap 0 = do not learn the speed
@@ -1382,6 +1455,9 @@ bool spinTurn(int dir, int deg, uint8_t skip){
   unsigned long tMax = full * 250UL / 100UL;
   SpinTrack k;
   spinBegin(k, dir);
+  /* [E33] v3: a restart in this spin carries on with it (resumeTurn) */
+  keep.step = KS_TURN; keep.cur = 9;    /* (9: keepSpin saves it all now) */
+  keepSpin(dir, skip, 0);
   /* [E33] At a column end the end line can already be under the bar when
    * the spin starts (the robot stopped a little short, or at a slant). If it
    * sits in the middle or on the side the robot turns toward, it sweeps
@@ -1465,6 +1541,8 @@ bool spinTurn(int dir, int deg, uint8_t skip){
       target = true;                       /* the line we want is coming in: slow down */
       spinAt(dir, TURN_SLOW_SP + bump);
     }
+    /* [E33] v3: how far the spin has got, for a restart */
+    keepSpin(dir, skip - passes, target ? 2 : (k.state & k.counts));
     if(target && k.state == 1 && k.e <= STOP_ERR) break;
   }
   stopRobot();
@@ -1588,6 +1666,21 @@ void turnBy180(int dir){
   afterTurn(dir);
 }
 
+/* [E33] v3: finish a turn that a restart broke off. keep says how far the
+ * spin had got: the lines it still had to pass, and what was under the bar
+ * (a line it was passing, or already the new road). */
+void resumeTurn(){
+  int dir = keep.dir;
+  if(keep.cur != 2){                     /* the new road had not come in yet */
+    int8_t left = keep.left;
+    if(keep.cur == 1) left--;            /* the line it was passing: passed */
+    if(left < 0) left = 0;
+    /* (as a 90: the part of the turn that is left is never more than 180) */
+    if(!spinTurn(dir, 90, left)) fault(6, F("turn never found the line"));
+  }
+  afterTurn(dir);
+}
+
 void turnRight90(){  turnBy90(+1); }
 void turnLeft90(){   turnBy90(-1); }
 void turnRight180(){ turnBy180(+1); }
@@ -1600,8 +1693,11 @@ void turnLeft180(){  turnBy180(-1); }
  *  pushing at full current. Both cut the current peaks that can reset the
  *  Nano on a 9 V battery.
  * ===================================================================== */
-int gripNow = GRIP_OPEN;
-int armNow  = ARM_DOWN;
+/* [E33] v3: the angles the servos were last sent, in the memory a reset
+ * keeps: after a restart in the middle of a run beginFnc() sends the servos
+ * these same angles, so a held object stays in the jaws */
+int gripNow NOINIT;
+int armNow  NOINIT;
 
 /* =====================================================================
  *  [E33]  THE SUPPLY VOLTAGE (VCC), measured with no extra wire
@@ -1684,15 +1780,6 @@ void powerWait(uint16_t ms){
 #endif
 }
 
-/* The LED says "B" for battery in Morse, twice: long, short, short, short.
- * (No other LED signal mixes long and short.) About 3 s. */
-void ledBattery(){
-  for(uint8_t k=0;k<8;k++){
-    digitalWrite(LED_PIN, 1); delay((k & 3) ? 100 : 350);
-    digitalWrite(LED_PIN, 0); delay((k & 3) == 3 ? 600 : 100);
-  }
-}
-
 /* The supply into the run log (a POWER record: not at the start, where the
  * log begins only at "go"), the live POWER line, and the warning if it was
  * low (what: 0 the start, 1 a pick, 2 / 3 a place, 4 the end; the end only
@@ -1704,10 +1791,9 @@ bool powerShow(uint8_t what, uint16_t rest, uint16_t low){
   labelInt(F("n="), numGride); Serial.print(' ');
   printPower(what, rest, low, warn); Serial.println();
 #endif
-  if(warn && what < 4){
-    Serial.println(F("WARNING: low supply: weak battery (README: The battery)"));
-    ledBattery();
-  }
+  /* [E33] v3: the warning only (v2 also blinked the LED for 3 s here, and
+   * the robot waited for it) */
+  if(warn && what < 4) Serial.println(F("WARNING: low supply: weak battery (README: The battery)"));
   return warn;
 }
 
@@ -1720,6 +1806,7 @@ void servoTo(Servo &s, int &now, int target){
     if(d < -3) d = -3;
     now += d;
     s.write(now);
+    keepSave();                          /* [E33] v3: the angle, for a restart */
     powerWait(20);                       /* [E33] delay(20), measuring the supply */
   }
 }
@@ -1732,6 +1819,7 @@ void keepup_object(){
   delay(100);
   servoTo(servo_y, armNow, ARM_CARRY);//ยกของ
   delay(300);
+  keep.held = 1; keepSave();             /* [E33] v3: for a restart */
 }
 
 void put_object(){
@@ -1739,6 +1827,7 @@ void put_object(){
   delay(200);
   servoTo(servo_x, gripNow, GRIP_RELEASE);//คลายแขนหนีบ
   delay(200);
+  keep.held = 0; keepSave();             /* [E33] v3: for a restart */
 }
 
 void arm_over_head(){
@@ -1746,9 +1835,25 @@ void arm_over_head(){
   delay(200);
 }
 
+/* [E33] v3: is the robot held in the air? Then nothing reflects and every
+ * sensor reads black. On the way to a crossing (not at a column end) the
+ * bar must also see something: a line, or the crossing. 0.2 s, standing. */
+bool lifted(){
+  uint8_t blank = (keep.step == KS_DRIVE && caseKind(keep.n) != K_END) ? 0 : 99;
+  uint8_t odd = 0;
+  for(uint8_t k=0;k<10;k++){
+    uint8_t b = popcount8(scanBar());
+    if(b >= 7 || b == blank) odd++;
+    delay(20);
+  }
+  return odd >= 8;
+}
+
 /* ===================================================================== */
 
-void beginFnc(){
+/* ([E33] v3: noinline only because the Nano's flash is full: the compiler
+ * makes the whole program about 180 bytes smaller this way) */
+__attribute__((noinline)) void beginFnc(){
   pinMode(sp_L,OUTPUT); pinMode(F_L,OUTPUT); pinMode(B_L,OUTPUT);
   pinMode(sp_R,OUTPUT); pinMode(F_R,OUTPUT); pinMode(B_R,OUTPUT);
   pinMode(STBY,OUTPUT);
@@ -1773,35 +1878,57 @@ void beginFnc(){
   calSanitize();
   calApply();
 
-  /* [E33] After a brown-out reset we do NOT start again: the robot is
-   * somewhere in the middle of the field and would drive off. */
   printResetCause();
   printCalSource();
   bool midRun = (runMark == RUN_MARK);
-  runMark = 0;                           /* the next reset starts normally */
-  if(brownOutReset() || midRun){
 #if ROBOT_MODE == MODE_MISSION
-    if(midRun) logRestart();             /* [E33] mark it in the run log (only a
+  /* [E33] v3: a restart in the middle of a run (the battery dipped when a
+   * motor or a servo started) does not stop the robot: it carries on from
+   * the count it kept (startMission). The chip's reset flags were read once
+   * and cleared at start-up (grabResetFlags), so they are this reset's own.
+   * Not carried on: a switch-on (this memory is lost, the check sum fails),
+   * the reset button or USB alone (a new start on purpose), or the robot
+   * lifted (lifted(): the bar sees black everywhere). On this Nano a dip of
+   * the battery reports "power-on" too (all of your restarts did), so the
+   * memory, not that flag, tells a dip from switching on. */
+  if(midRun){
+    Serial.println(F("RESTARTED IN THE MIDDLE OF A RUN (brown-out: weak battery; or reset / USB)."));
+    resuming = keepValid() && resetCause() != RF_EXT;
+    if(resuming && lifted()){
+      resuming = false;
+      Serial.println(F("Lifted: a new start."));
+    }
+    logRestart(resuming);                /* [E33] mark it in the run log (only a
                                           * restart after "go" belongs to a run) */
-    logPrint();                          /* and show the log now */
-#endif
+  }
+  /* the next reset starts normally. (When it carries on, runMark stays: a
+   * second restart before it drives on, for example when the servos take up
+   * the load again below, is still this run, not a new start in the middle
+   * of the field.) */
+  if(!resuming){ runMark = 0; gripNow = GRIP_OPEN; armNow = ARM_DOWN; }
+#else
+  runMark = 0;                           /* the next reset starts normally */
+  /* [E33] After a brown-out reset we do NOT start again: the robot is
+   * somewhere in the middle of the field and would drive off. */
+  if(brownOutReset() || midRun){
     Serial.println(F("RESTARTED IN THE MIDDLE OF A RUN (brown-out: weak battery; or reset / USB)."));
     Serial.println(F("Not driving. Fresh battery, robot at the start, then press reset."));
     while(1){ digitalWrite(LED_PIN, (millis()/100) & 1); }
   }
+  gripNow = GRIP_OPEN; armNow = ARM_DOWN;
+#endif
 
   delay(1000);
 
   /* [E33] write the angle BEFORE attach, so the first pulse is the angle we
-   * want and not the library's 90 degrees; one servo at a time. */
-  servo_x.write(GRIP_OPEN);//คลายแขนจับ
+   * want and not the library's 90 degrees; one servo at a time. (v3: after
+   * a restart these are the angles it had, so the jaws stay as they were.) */
+  servo_x.write(gripNow);//คลายแขนจับ
   servo_x.attach(x_pin);//เชื่อมต่อขาสัญญาณ
   delay(300);
-  servo_y.write(ARM_DOWN);//ยกแขนลง
+  servo_y.write(armNow);//ยกแขนลง
   servo_y.attach(y_pin);//เชื่อมต่อขาสัญญาณ
   delay(300);
-  gripNow = GRIP_OPEN;
-  armNow  = ARM_DOWN;
 
   digitalWrite(STBY,1);
   clearPid();

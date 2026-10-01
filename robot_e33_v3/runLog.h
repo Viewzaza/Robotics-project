@@ -157,18 +157,26 @@ void logEnd(uint8_t state){
 }
 
 /* At start-up after a restart in the middle of a run: note it in the record
- * of that run (if that run had got as far as its first stop). */
-void logRestart(){
+ * of that run (if that run had got as far as its first stop).
+ * [E33] v3: goOn = the robot carries on with that run: the record goes on
+ * after the RESTART line (so it shows the whole run), still "running". */
+void logRestart(bool goOn){
 #if RUN_LOG
-  if(!logValid() || EEPROM.read(LOG_ADDR + 3) != LS_RUNNING) return;
+  bool ok = logValid() && EEPROM.read(LOG_ADDR + 3) == LS_RUNNING;
   uint8_t c = EEPROM.read(LOG_ADDR + 2);
-  if(c < LOG_MAX){
+  if(ok && c < LOG_MAX){
     LogRec r;
     r.type = LG_RESTART; r.n = 0; r.t10 = 0; r.a = 0; r.b = 0; r.mask = 0; r.x = 0;
     EEPROM.put(LOG_ADDR + 4 + c * LOG_RECSZ, r);
-    EEPROM.update(LOG_ADDR + 2, c + 1);
+    EEPROM.update(LOG_ADDR + 2, ++c);
   }
-  EEPROM.update(LOG_ADDR + 3, LS_RESTART);
+  if(goOn){
+    logN = 0; logOn = true; logT0 = millis();
+    logFresh = !ok; logCount = c;        /* (no record yet: a new one) */
+    if(!ok) logAdd(LG_RESTART, 0, 0, 0, 0, 0);   /* (that one says so first) */
+  }else if(ok) EEPROM.update(LOG_ADDR + 3, LS_RESTART);
+#else
+  (void)goOn;
 #endif
 }
 
