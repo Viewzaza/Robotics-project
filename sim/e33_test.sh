@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-# Test robot_e33 in the simulator: for every condition, run
+# Test the e33 sketches (e33_mission and e33_calibrate) in the simulator: for every condition, run
 #   A) the mission with no calibration (defaults in calibration.h), and
 #   B) MODE_CALIBRATE on a fresh EEPROM, then the mission using that EEPROM.
 #
 #   ./sim/e33_test.sh                 # the standard list below
 #   ./sim/e33_test.sh "--trimL=0.6 --dbL=50" "--overhang=3"   # your own conditions
 #   VERBOSE=1 ./sim/e33_test.sh "--trimL=0.6"                 # show the firmware's trace
-#   FW=robot_e33 ./sim/e33_test.sh    # test another sketch folder (default robot_e33_v2)
+#   FW=robot_e33 ./sim/e33_test.sh    # one sketch folder for both (the older all-in-one sketches)
+#   (default: the mission from e33_mission, the calibration from e33_calibrate)
 #   DEFS="-DROUTE_ORDER=132" ./sim/e33_test.sh   # extra defines for both builds (the other route)
+#   GUESS=1 ./sim/e33_test.sh        # no-cal with guessed sensor levels (the standing-still measurement)
+# (no-cal = the levels and numbers written in calibration.h: your measured levels, default motors)
 #   PATHCHECK=1 ./sim/e33_test.sh     # also check every count of the calibrated mission against
 #                                     # the route (sim/path_check.py): a "path" column, and why not
 #
-# Every run places the robot the way robot_e33 expects: axle over C1 (--startx=0).
+# Every run places the robot the way the e33 sketches expect: axle over C1 (--startx=0).
 set -u
 cd "$(dirname "$0")/.."
 BUILD="g++ -O2 -std=c++14 -I sim"
-FW="${FW:-robot_e33_v2}"
-INO="\"../$FW/$FW.ino\""
+if [ -n "${FW:-}" ]; then MFW="$FW"; CFW="$FW"; else MFW=e33_mission; CFW=e33_calibrate; fi
+INO="\"../$MFW/$MFW.ino\""
+CINO="\"../$CFW/$CFW.ino\""
+# the files both programs share must be the same in both folders
+if [ "$MFW" != "$CFW" ]; then
+  for f in calibration.h controlLibrary.h pidLibrary.h runLog.h; do
+    cmp -s "$MFW/$f" "$CFW/$f" || echo "WARNING: $MFW/$f and $CFW/$f differ (copy one over the other)"
+  done
+fi
 DEFS="${DEFS:-}"
-$BUILD $DEFS -DFIRMWARE_INO="$INO" -o sim/sim_e33.exe sim/sim.cpp || exit 2
-$BUILD $DEFS -DROBOT_MODE=1 -DFIRMWARE_INO="$INO" -o sim/sim_e33cal.exe sim/sim.cpp || exit 2
+# GUESS=1: the no-cal mission uses guessed levels (250 / 750) instead of the measured ones in
+# calibration.h, so it measures the levels itself, standing still
+[ "${GUESS:-0}" = "1" ] && GDEFS="-DSIM_GUESS_LEVELS -DCAL_SENSORS_MEASURED=0" || GDEFS=""
+$BUILD $DEFS $GDEFS -DFIRMWARE_INO="$INO" -o sim/sim_e33.exe sim/sim.cpp || exit 2
+$BUILD $DEFS -DROBOT_MODE=1 -DFIRMWARE_INO="$CINO" -o sim/sim_e33cal.exe sim/sim.cpp || exit 2
 
 if [ $# -gt 0 ]; then
   CONDS=("$@")

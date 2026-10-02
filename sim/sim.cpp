@@ -1,6 +1,6 @@
 // Host-side simulator for the e33 line-following mission.
 // Models the field, differential-drive kinematics, the 8-channel reflectance
-// bar mounted 9.5 cm ahead of the pivot, and the gripper -- then runs the real
+// bar mounted 9.5 cm ahead of the pivot, and the gripper, then runs the real
 // firmware (setup()/loop()) against it.
 //
 // Build:  g++ -O2 -std=c++14 -I sim -o sim/sim.exe sim/sim.cpp
@@ -13,6 +13,8 @@
 //   motors  : --trimL=G (left gain; --trim is the right gain) --dbL=N --dbR=N --db=N
 //   supply  : --vbat=V --rint=OHM ... (only the firmware's VCC reading and the
 //             brown-out check; the defaults are a fresh 9 V PP3, see --help)
+//   presets : --real (lag, scrub, sag), --student / --student-slow / --student-fast
+//             (the student's robot: see applyStudent() and --help)
 #include <cstdarg>
 #define _USE_MATH_DEFINES
 #ifndef M_PI
@@ -25,6 +27,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#ifdef _WIN32
+#include <process.h>                     // _spawnv (--reset)
+#else
+#include <unistd.h>                      // fork, execv (--reset)
+#include <sys/wait.h>
+#endif
 
 SerialClass Serial;
 #include "EEPROM.h"
@@ -49,6 +57,8 @@ struct Cfg {
   double overhang    = 12.0;  // cm, how far TOP/MID/BOT stick out past C1 and C4 (--overhang)
   double trimLrev    = -1;    // left gain driving backward; <0 = same as forward (--trimLr)
   double trimRrev    = -1;    // right gain driving backward                     (--trimRr)
+  double dbLrev      = -1;    // left dead band driving backward; <0 = same as forward (--dbLr)
+  double dbRrev      = -1;    // right dead band driving backward                     (--dbRr)
 
   // ---- analog sensor realism. The defaults reproduce the original ideal
   // ---- bar exactly: 100 over white, 900 over black, a hard step at the tape
@@ -73,6 +83,9 @@ struct Cfg {
   double sag         = 0.0;   // speed fraction lost while a servo moves (--sag)
   double sagHold     = 0.0;   // ... while the gripper holds an object (--saghold)
   double sensLag     = 0.0;   // ms, first-order lag of every sensor channel (--slag)
+  double lift        = 0.0;   // the bar reads darker while the robot speeds up (--lift=G[:MS]):
+  double liftMs      = 60.0;  //   each channel moves G x (forward acceleration in m/s^2) of the
+                              //   way to 1023, the acceleration smoothed over MS ms
 
   // ---- supply model (the firmware measures its own VCC against the chip's
   // ---- 1.1 V bandgap). It only gives that reading and the brown-out check;
@@ -142,6 +155,40 @@ static bool erased(double px, double py) {
   return inRect(w_wipe, px, py);
 }
 
+// Field set-up variations (all empty / off by default, so the field is the clean one).
+//   --objoff=NAME:DX:DY    move object o1..o3 or target x1..x3 by (DX,DY) cm from its place
+//   --gripr=CM             how close the jaws must be to take an object (default 3.5)
+//   --wzone=X:Y:HW:HH:DW[:MASK]  inside this rectangle the white of the channels in MASK
+//                          (hex, bit K = channel K, default ff) reads DW higher (the black
+//                          stays: a darker or dirtier patch of the field)
+//   --wshift=DW:T0:T1[:MASK]  the white of those channels moves by DW, linearly from sim
+//                          time T0 to T1 (s), then stays: the light changing during the run
+//   --bshift=DW:T0:T1[:MASK]  the same for the black level
+struct ObjOff { std::string name; double dx, dy; };
+static std::vector<ObjOff> w_objOff;
+struct WZone { double x, y, hw, hh, dw; unsigned mask; };
+static std::vector<WZone> w_wzone;
+struct LShift { double dw, t0, t1; unsigned mask; };
+static std::vector<LShift> w_wshift, w_bshift;
+static double shiftNow(const std::vector<LShift>& v, int ch) {
+  double d = 0, t = simNowSec();
+  for (size_t i = 0; i < v.size(); i++) {
+    const LShift& q = v[i];
+    if (!(q.mask & (1u << ch)) || t < q.t0) continue;
+    double f = (q.t1 > q.t0) ? (t - q.t0) / (q.t1 - q.t0) : 1.0;
+    d += q.dw * (f > 1.0 ? 1.0 : f);
+  }
+  return d;
+}
+static double zoneNow(double px, double py, int ch) {
+  double d = 0;
+  for (size_t i = 0; i < w_wzone.size(); i++) {
+    const WZone& z = w_wzone[i];
+    if ((z.mask & (1u << ch)) && std::fabs(px - z.x) <= z.hw && std::fabs(py - z.y) <= z.hh) d += z.dw;
+  }
+  return d;
+}
+
 static void buildField() {
   const double c = CFG.cell;
   const double C1 = 0, C2 = c, C3 = 2 * c, C4 = 3 * c;
@@ -160,6 +207,15 @@ static void buildField() {
   w_targets.push_back({"x1", C4, BOT - d});
   w_targets.push_back({"x2", C3, BOT - d});
   w_targets.push_back({"x3", C2, BOT - d});
+  for (size_t k = 0; k < w_objOff.size(); k++) {
+    const ObjOff& q = w_objOff[k];
+    bool found = false;
+    for (size_t i = 0; i < w_objs.size(); i++)
+      if (w_objs[i].name == q.name) { w_objs[i].x += q.dx; w_objs[i].y += q.dy; found = true; }
+    for (size_t i = 0; i < w_targets.size(); i++)
+      if (w_targets[i].name == q.name) { w_targets[i].x += q.dx; w_targets[i].y += q.dy; found = true; }
+    if (!found) fprintf(stderr, "sim: --objoff: no object or target %s\n", q.name.c_str());
+  }
 }
 
 static double distToSeg(double px, double py, const Seg& s) {
@@ -194,7 +250,7 @@ static double distToNearestLine(double px, double py) {
 // edge  > 0: a smooth ramp of that width centred on the tape edge, so the
 //            reading is exactly halfway at the edge and saturates edge/2
 //            inside / outside it. A tape narrower than the ramp never reaches
-//            full black -- which is what a real, slightly defocused sensor does.
+//            full black, which is what a real, slightly defocused sensor does.
 static double tapeCoverage(double px, double py) {
   if (CFG.edge <= 0) return onLine(px, py) ? 1.0 : 0.0;
   if (patched(px, py)) return 1.0;
@@ -251,13 +307,15 @@ static void logEvent(const char* fmt, ...) {
 // direction pins + duty -> wheel velocity in cm/s
 // Below its own dead band a motor does not turn at all; above it, speed rises
 // linearly to vMax*trim at duty 255.
-static double wheelV(int fPin, int bPin, int pwmPin, double trim, double db, double trimRev) {
+static double wheelV(int fPin, int bPin, int pwmPin, double trim, double dbFwd, double trimRev,
+                     double dbRev) {
   if (w_digital[10] == 0) return 0;          // STBY low: driver disabled
   int f = w_digital[fPin], b = w_digital[bPin];
   if (f == b) return 0;                      // both high = brake, both low = coast
   double duty = w_pwm[pwmPin];
-  if (duty <= db) return 0;
   bool fwd = (f == 1 && b == 0);
+  double db = (!fwd && dbRev >= 0) ? dbRev : dbFwd;
+  if (duty <= db) return 0;
   double g = (!fwd && trimRev >= 0) ? trimRev : trim;
   double v = (duty - db) / (255.0 - db) * CFG.vMax * g;
   return fwd ? v : -v;
@@ -308,8 +366,8 @@ static double supplyVin() { return CFG.vbat - CFG.rint * supplyAmps(); }
 static double supplyVcc() { double v = supplyVin() - CFG.ldo; return v > 5.0 ? 5.0 : (v < 0 ? 0 : v); }
 static void brownOut(double vcc);
 
-static void wheelStep(WheelSt& w, int fPin, int bPin, int pwmPin, double trim, double db,
-                      double trimRev, double dt_s) {
+static void wheelStep(WheelSt& w, int fPin, int bPin, int pwmPin, double trim, double dbFwd,
+                      double trimRev, double dbRev, double dt_s) {
   int mode, dir = 0;                           // mode 0 coast, 1 short brake, 2 drive
   if (w_digital[10] == 0) mode = 0;
   else {
@@ -320,10 +378,12 @@ static void wheelStep(WheelSt& w, int fPin, int bPin, int pwmPin, double trim, d
   double duty = (mode == 2) ? w_pwm[pwmPin] * (1.0 - w_sagNow) : 0;
   if (mode == 2 && duty <= 0) mode = 1;        // PWM low all the time = short brake
   if (w.stuck) {                               // static friction
-    if (mode == 2 && duty > db) w.stuck = false;
+    double db0 = (dir < 0 && dbRev >= 0) ? dbRev : dbFwd;
+    if (mode == 2 && duty > db0) w.stuck = false;
     else { w.v = 0; return; }
   }
   double sgnv = (w.v > 0) ? 1 : (w.v < 0 ? -1 : dir);
+  double db = (sgnv < 0 && dbRev >= 0) ? dbRev : dbFwd;
   double dbR = db * CFG.dbRun;                 // running friction, in duty
   double g = (sgnv < 0 && trimRev >= 0) ? trimRev : trim;
   double k = CFG.vMax * g / (255.0 - dbR);     // cm/s per duty above friction
@@ -345,12 +405,27 @@ static void wheelStep(WheelSt& w, int fPin, int bPin, int pwmPin, double trim, d
 
 static void sensorPos(int idx, double& bx, double& by);
 
+// --lift: the real robot saw a "crossing" a few cm after almost every
+// standing start (the start, and after each turn) where there is none: the
+// whole bar read darker while the robot sped up (its front lifting as it
+// pulls away, or the IR LEDs dimming while the motors draw their start
+// current). Modelled as a darkening in proportion to the forward
+// acceleration, smoothed over --lift's MS. Off (0) by default: nothing runs.
+static double w_liftAcc = 0, w_liftV = 0;      // cm/s^2 (smoothed), cm/s
+static void liftStep(double v, double dt_s) {
+  double a = (v - w_liftV) / dt_s;
+  w_liftV = v;
+  double f = CFG.liftMs > 0 ? 1.0 - std::exp(-dt_s * 1000.0 / CFG.liftMs) : 1.0;
+  w_liftAcc += (a - w_liftAcc) * f;
+}
+
 static void stepPhysicsReal(double dt_s) {
   w_sagNow = sagNow();
-  wheelStep(w_wL, 12, 11, 6, CFG.trimL, CFG.dbL, CFG.trimLrev, dt_s);
-  wheelStep(w_wR, 7, 8, 3, CFG.trimR, CFG.dbR, CFG.trimRrev, dt_s);
+  wheelStep(w_wL, 12, 11, 6, CFG.trimL, CFG.dbL, CFG.trimLrev, CFG.dbLrev, dt_s);
+  wheelStep(w_wR, 7, 8, 3, CFG.trimR, CFG.dbR, CFG.trimRrev, CFG.dbRrev, dt_s);
   double vL = w_wL.v, vR = w_wR.v;
   double v = (vL + vR) / 2.0;
+  if (CFG.lift > 0) liftStep(v, dt_s);
   double omega = (vR - vL) / CFG.track;
   double vlat = 0;
   double a = std::fabs(vL) + std::fabs(vR);
@@ -394,9 +469,10 @@ static void stepPhysicsReal(double dt_s) {
 
 static void stepPhysics(double dt_s) {
   if (w_phys) { stepPhysicsReal(dt_s); return; }
-  double vL = wheelV(12, 11, 6, CFG.trimL, CFG.dbL, CFG.trimLrev);
-  double vR = wheelV(7, 8, 3, CFG.trimR, CFG.dbR, CFG.trimRrev);
+  double vL = wheelV(12, 11, 6, CFG.trimL, CFG.dbL, CFG.trimLrev, CFG.dbLrev);
+  double vR = wheelV(7, 8, 3, CFG.trimR, CFG.dbR, CFG.trimRrev, CFG.dbRrev);
   double v = (vL + vR) / 2.0;
+  if (CFG.lift > 0) liftStep(v, dt_s);
   double omega = (vR - vL) / CFG.track;
   w_rob.x += v * std::cos(w_rob.th) * dt_s;
   w_rob.y += v * std::sin(w_rob.th) * dt_s;
@@ -449,6 +525,87 @@ static void pathWatch() {
          w_t_us / 1e6, n, w_rob.x, w_rob.y, w_rob.th * 180 / M_PI, x >> 8, x & 255);
 }
 
+// --reset=SPEC (repeatable; none by default): the Nano restarts in the middle
+// of the run, as the student's did at picks and turns (a brown-out, or a
+// power glitch). The robot stops where it is, the EEPROM and the firmware's
+// .noinit RAM (runMark) are kept, and the firmware starts again from setup()
+// in a fresh copy of this program that continues the same run (same clock,
+// pose, objects; a held object is in the jaws until the firmware opens them).
+//   t:T            at sim time T s
+//   n:N[:MS]       MS ms after the firmware's count changes to N
+//   servo:K[:MS]   MS ms after the K-th servo move of the run begins (a move =
+//                  servo steps with no pause of 400 ms or more: a whole pick,
+//                  or a whole put_object; the power-up moves do not count)
+//   spin:K[:MS]    MS ms after the K-th spin of the run is seen (the wheels
+//                  driven in opposite directions for 50 ms; the short nudges
+//                  that centre the bar do not count, nor a spin that starts
+//                  less than 300 ms after the last one ended)
+//   grip:K[:MS]    MS ms after the gripper servo (D5) closes for the K-th time
+//   release:K[:MS] MS ms after it opens for the K-th time while holding an object
+//   pickturn:K[:MS] MS ms after the first spin seen after the K-th closing
+//                  (these three are the same events whatever the firmware's servo
+//                  steps and pauses are: the real-robot test kit uses them)
+// Each SPEC fires once. --bor=restart makes a supply brown-out (--bod) restart
+// the firmware in the same way instead of ending the run. --resetcause=N: the
+// reset flags the restarted firmware reads (1 power-on, as the student's log
+// shows, 2 reset button / USB, 4 brown-out). --maxresets=N (default 4).
+struct ResetSpec { char kind; double a, ms; bool armed, fired; double tFire; std::string text; };
+static std::vector<ResetSpec> w_resets;
+static bool   w_borRestart = false;
+static int    w_resetCause = 1, w_maxResets = 4, w_resetsDone = 0;
+static int    w_servoEp = 0, w_spinEp = 0;      // servo moves and spins so far in this run
+static int    w_gripEp = 0, w_relEp = 0;        // gripper closings and releases of a held object (grip:, release:)
+static int    w_spinAtGrip[16];                 // the spin count when the K-th closing happened (pickturn:)
+static double w_lastServoUs = -1e18;
+static double w_odoAtStart = 0;                 // the path driven when this program started
+static bool   w_spinning = false, w_spinCounted = false;
+static double w_spinT0 = 0, w_spinEnd = -1e18;
+static int    (*w_countFn)() = 0;               // reads numGride (set in main)
+static int    w_countLast = -100000;
+static void doReset(const char* why);
+static void resetWatch() {
+  bool on = w_digital[10] && w_pwm[6] > 0 && w_pwm[3] > 0;
+  int dl = (w_digital[12] != w_digital[11]) ? (w_digital[12] ? 1 : -1) : 0;
+  int dr = (w_digital[7] != w_digital[8]) ? (w_digital[7] ? 1 : -1) : 0;
+  bool sp = on && dl && dr && dl != dr;
+  if (sp) {
+    if (!w_spinning) w_spinT0 = w_t_us;
+    if (!w_spinCounted && w_t_us - w_spinT0 >= 50000.0) {
+      if (w_spinT0 - w_spinEnd >= 300000.0) w_spinEp++;
+      w_spinCounted = true;
+    }
+  } else if (w_spinning) {
+    if (w_spinCounted) w_spinEnd = w_t_us;
+    w_spinCounted = false;
+  }
+  w_spinning = sp;
+  int n = w_countFn ? w_countFn() : 0;
+  bool nChanged = (w_countLast != -100000 && n != w_countLast);
+  w_countLast = n;
+  for (size_t i = 0; i < w_resets.size(); i++) {
+    ResetSpec& r = w_resets[i];
+    if (r.fired) continue;
+    if (!r.armed) {
+      bool go = false;
+      if (r.kind == 't') go = w_t_us >= r.a * 1e6;
+      else if (r.kind == 'n') go = nChanged && n == (int)r.a;
+      else if (r.kind == 's') go = w_servoEp >= (int)r.a;
+      else if (r.kind == 'p') go = w_spinEp >= (int)r.a;
+      else if (r.kind == 'g') go = w_gripEp >= (int)r.a;
+      else if (r.kind == 'r') go = w_relEp >= (int)r.a;
+      else if (r.kind == 'k') go = (int)r.a >= 1 && (int)r.a <= 16 && w_gripEp >= (int)r.a &&
+                                   w_spinEp > w_spinAtGrip[(int)r.a - 1];
+      if (go) { r.armed = true; r.tFire = w_t_us + r.ms * 1000.0; }
+    }
+    if (r.armed && w_t_us >= r.tFire) {
+      r.fired = true;
+      char why[96];
+      snprintf(why, sizeof why, "--reset=%s", r.text.c_str());
+      doReset(why);
+    }
+  }
+}
+
 static double w_trT0 = -1, w_trT1 = -1, w_trNext = 0;   // --trace=T0:T1 (s)
 static void advance(double us) {
   const double MAXSTEP = 1000.0;             // integrate in <=1 ms slices
@@ -458,6 +615,7 @@ static void advance(double us) {
     w_t_us += chunk;
     us -= chunk;
     { double vcc = supplyVcc(); if (vcc < CFG.bod) brownOut(vcc); }   // (never with the defaults)
+    if (!w_resets.empty()) resetWatch();       // --reset (none by default)
     if (w_trT0 >= 0 && w_t_us >= w_trNext && w_t_us / 1e6 >= w_trT0 && w_t_us / 1e6 <= w_trT1) {
       w_trNext = w_t_us + 20000.0;
       printf("[%7.3fs] TRACE pose=(%6.2f,%6.2f) hdg=%7.1f vL=%6.2f vR=%6.2f pwmL=%3d%c pwmR=%3d%c\n", w_t_us / 1e6,
@@ -496,16 +654,93 @@ static void sensorPos(int idx, double& bx, double& by) {
   by = w_rob.y + CFG.sensorAhead * std::sin(w_rob.th) + off * std::cos(w_rob.th);
 }
 
+// --rawfile=FILE: real Serial Monitor printouts played back into A0..A7 while
+// the robot stands still (sim/student_frames.txt, sim/replay_test.sh). Each
+// frame is held for --rawhold ms, from the firmware's first analogRead; after
+// the last one the run ends. Without the flag the list is empty and nothing
+// changes.
+struct RawFrame { int v[8]; int line; };
+static std::vector<RawFrame> w_raw;
+static double w_rawHoldMs = 1000.0;          // --rawhold=MS
+static long   w_rawShown = -1;               // the frame last announced (verbose)
+static double w_rawT0 = -1;                  // us: the firmware's first look at the bar
+static int rawFrameValue(int idx) {
+  if (w_rawT0 < 0) w_rawT0 = w_t_us;
+  size_t k = (size_t)((w_t_us - w_rawT0) / (w_rawHoldMs * 1000.0));
+  if (k >= w_raw.size()) { finishRun("rawfile: every frame played"); return 0; }
+  if ((long)k != w_rawShown) {
+    w_rawShown = (long)k;
+    if (w_verbose) {
+      const int* f = w_raw[k].v;
+      logEvent("RAW     frame %d of %d (file line %d): %d %d %d %d %d %d %d %d", (int)k + 1, (int)w_raw.size(),
+               w_raw[k].line, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+    }
+  }
+  return w_raw[k].v[idx];
+}
+// Reads the frames: a line with "raw" and 8 numbers after it (a waiting-screen
+// or meter line as the Serial Monitor shows it), or a line of just 8 numbers.
+// "[name]" starts a part; part (--rawpart) keeps only the parts named so (the
+// first word of the name is enough). Anything else is skipped.
+static bool loadRawFile(const char* path, const char* part) {
+  FILE* f = fopen(path, "r");
+  if (!f) { fprintf(stderr, "sim: cannot open --rawfile=%s\n", path); return false; }
+  char buf[512], sect[128] = "";
+  int ln = 0;
+  while (fgets(buf, sizeof buf, f)) {
+    ln++;
+    char* s = buf;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '[') {
+      char* e = strchr(s, ']');
+      size_t n = e ? (size_t)(e - s - 1) : 0;
+      if (n >= sizeof sect) n = sizeof sect - 1;
+      memcpy(sect, s + 1, n); sect[n] = 0;
+      continue;
+    }
+    if (*s == '#') continue;
+    if (part && *part) {
+      size_t n = strlen(part);
+      if (strncmp(sect, part, n) || (sect[n] != 0 && sect[n] != ' ' && sect[n] != ':')) continue;
+    }
+    char* p = strstr(s, "raw ");
+    p = p ? p + 4 : s;
+    RawFrame fr; fr.line = ln;
+    int got = 0;
+    for (; got < 8; got++) {
+      char* q;
+      long x = strtol(p, &q, 10);
+      if (q == p || x < 0 || x > 1023) break;
+      fr.v[got] = (int)x; p = q;
+    }
+    if (got == 8 && (*p == 0 || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) w_raw.push_back(fr);
+    else if (strstr(s, "raw ")) fprintf(stderr, "sim: --rawfile line %d skipped (not 8 readings)\n", ln);
+  }
+  fclose(f);
+  if (w_raw.empty()) { fprintf(stderr, "sim: no frames in --rawfile=%s%s%s\n", path, part ? " part " : "", part ? part : ""); return false; }
+  return true;
+}
+
 int analogRead(int pin) {
   advance(104);                              // a real analogRead costs ~104 us
   int idx = pin - A0;
   if (idx < 0 || idx > 7) return 0;
+  if (!w_raw.empty()) return rawFrameValue(idx);
   double bx, by;
   sensorPos(idx, bx, by);
   // With every realism flag at its default this is exactly the original
   // "onLine ? 900 : 100": coverage is 0 or 1, 100 + 800*c, and no noise draw.
   double c = (CFG.sensLag > 0 && w_sensInit) ? w_sensC[idx] : tapeCoverage(bx, by);
-  double v = w_chWhite[idx] + (w_chBlack[idx] - w_chWhite[idx]) * c;
+  double wl = w_chWhite[idx], bl = w_chBlack[idx];
+  if (!w_wzone.empty()) wl += zoneNow(bx, by, idx);
+  if (!w_wshift.empty()) wl += shiftNow(w_wshift, idx);
+  if (!w_bshift.empty()) bl += shiftNow(w_bshift, idx);
+  double v = wl + (bl - wl) * c;
+  if (CFG.lift > 0 && w_liftAcc > 0) {        /* --lift: darker while speeding up */
+    double k = CFG.lift * w_liftAcc / 100.0;
+    if (k > 0.9) k = 0.9;
+    v += k * (1023.0 - v);
+  }
   if (CFG.noise > 0) v += CFG.noise * rngGauss();
   long r = std::lround(v);
   if (r < 0) r = 0; else if (r > 1023) r = 1023;          // the 10-bit ADC range
@@ -530,6 +765,7 @@ uint16_t sim_bandgap_adc() {
 static void brownOut(double vcc) {
   logEvent("BROWN-OUT VCC %.2f V (battery %.2f V at %.2f A): the Nano restarts here",
            vcc, supplyVin(), supplyAmps());
+  if (w_borRestart && w_resetsDone < w_maxResets) doReset("brown-out");   /* --bor=restart */
   finishRun("brown-out");
 }
 
@@ -542,13 +778,24 @@ void simDbg(const char* w, long a, long b, long c) {
 void sim_servo_write(int pin, int angle) {
   /* a servo that changes angle draws current for about one 20 ms frame */
   if (pin >= 0 && pin < 24 && w_servoAngle[pin] != angle) w_servoMoveUntil = w_t_us + 25000.0;
+  /* servo moves, for --reset=servo:K: only once the robot has driven since
+   * this program (or the restarted firmware) started, so the two moves of the
+   * power-up do not count */
+  if (pin >= 0 && pin < 24 && w_servoAngle[pin] != angle && w_rob.odo > w_odoAtStart + 0.5) {
+    if (w_t_us - w_lastServoUs >= 400000.0) w_servoEp++;
+    w_lastServoUs = w_t_us;
+  }
   if (pin >= 0 && pin < 24) w_servoAngle[pin] = angle;
   if (pin != 5) return;                      // only the gripper servo matters here
   /* Assumes SERVO_GRIP_CLOSED < 80 < SERVO_GRIP_OPEN. config.h is not visible
-   * this early in the file, so this stays a literal -- check it if you retune
+   * this early in the file, so this stays a literal: check it if you retune
    * the gripper angles. */
   bool closing = angle <= 80;
   if (closing && !w_gripClosed) {
+    if (w_rob.odo > w_odoAtStart + 0.5) {      /* (--reset=grip: / pickturn:; not a power-up move) */
+      if (w_gripEp < 16) w_spinAtGrip[w_gripEp] = w_spinEp;
+      w_gripEp++;
+    }
     double gx, gy;
     gripPoint(gx, gy);
     int found = -1;
@@ -568,6 +815,7 @@ void sim_servo_write(int pin, int angle) {
     w_gripClosed = true;
   } else if (!closing && w_gripClosed) {
     if (w_heldIdx >= 0) {
+      w_relEp++;                               /* (--reset=release:) */
       double gx, gy;
       gripPoint(gx, gy);
       w_objs[w_heldIdx].x = gx;
@@ -591,7 +839,7 @@ void sim_servo_write(int pin, int angle) {
 
 // --path: how the sim reads the firmware's count (see pathWatch)
 static int simPathCount() { return (int)numGride; }
-#ifdef N_DONE                                  /* robot_e33_v2: its retry and credit counters */
+#ifdef N_DONE                                  /* e33_mission: its retry and credit counters */
 static long simPathExtra() { return (long)nRetried * 256 + nCredited; }
 #else
 static long simPathExtra() { return 0; }
@@ -601,6 +849,7 @@ static const int w_pathRoute = ROUTE_ORDER;
 #else
 static const int w_pathRoute = 0;
 #endif
+
 
 // ----------------------------- runner ---------------------------------------
 static void usage() {
@@ -638,12 +887,28 @@ static void usage() {
     "    --patch=X:Y:HW:HH  black rectangle, half-width HW, half-height HH: a mark\n"
     "    --wipe=X:Y:HW:HH   white rectangle: a clean cut across the tape\n"
     "    --trimLr=G --trimRr=G  motor gain driving BACKWARD (default: same as forward)\n"
+    "    --dbLr=N --dbRr=N  motor dead band driving BACKWARD (default: same as forward)\n"
+    "    --track=CM         distance between the wheels (default 11)\n"
     "    --startx=CM --starty=CM --starth=DEG   axle position and heading (default -5 0 0;\n"
-    "                       robot_e33 is placed with the axle over C1: --startx=0)\n"
+    "                       the e33 sketches: the axle over C1, --startx=0)\n"
     "    --eeprom=FILE      load EEPROM from FILE at the start, save it back at the end\n"
     "    --still=S          end a run whose firmware has idled this long (default 10)\n"
     "    --at=T:X:Y:H       move the robot by hand at time T (for the check modes)\n"
     "    --sweep=T0:T1:X:Y0:Y1:H  slide it by hand from Y0 to Y1 between T0 and T1\n"
+    "  real printouts (sim/student_frames.txt, sim/replay_test.sh)\n"
+    "    --rawfile=FILE     play the \"raw\" readings of Serial Monitor lines into A0..A7, the robot\n"
+    "                       standing still; the run ends after the last frame\n"
+    "    --rawpart=NAME     only the frames under [NAME ...] in that file\n"
+    "    --rawhold=MS       how long each frame lasts (default 1000, the printouts' 1 s)\n"
+    "  field set-up (repeatable; all off by default; X, Y as for worn tape)\n"
+    "    --objoff=NAME:DX:DY  move object o1..o3 or target x1..x3 by DX, DY cm from its place\n"
+    "    --gripr=CM         the jaws take an object within this distance of them (default 3.5)\n"
+    "    --wzone=X:Y:HW:HH:DW[:MASK]  the white reads DW higher inside this rectangle (a darker\n"
+    "                       patch; the black level stays). MASK: the channels, hex, bit K =\n"
+    "                       channel K (default ff = all eight, 0f = A0..A3)\n"
+    "    --wshift=DW:T0:T1[:MASK]  the white moves by DW, linearly from sim time T0 to T1 s, then\n"
+    "                       stays (T0 = T1: a step): the light changing during the run\n"
+    "    --bshift=DW:T0:T1[:MASK]  the same for the black level\n"
     "  physical realism (all off by default; --real = the values in brackets, flags after it override)\n"
     "    --tau=MS           wheel speed lag, first order, while driven [100]\n"
     "    --taub=MS          the same while short-braking (default 0.75 x tau) [75]\n"
@@ -655,6 +920,23 @@ static void usage() {
     "    --sag=F            effective duty lost while a servo moves (battery sag) [0.10]\n"
     "    --saghold=F        ... while the gripper holds an object [0.04]\n"
     "    --slag=MS          sensor response lag, first order [1.5]\n"
+    "    --lift=G[:MS]      the bar reads darker while the robot speeds up: each channel moves G x the\n"
+    "                       forward acceleration (m/s^2, smoothed over MS ms, default 60) of the way to\n"
+    "                       1023 (the false crossing the real robot saw after each standing start)\n"
+    "  mid-run restarts (none by default; the EEPROM and the firmware's noinit RAM are kept, the robot\n"
+    "  stops where it is and the firmware starts again from setup() in the same run)\n"
+    "    --reset=SPEC       t:T at sim time T s; n:N[:MS] MS ms after the count becomes N;\n"
+    "                       servo:K[:MS] MS ms after the K-th servo move begins (a whole pick or place);\n"
+    "                       spin:K[:MS] MS ms after the K-th spin is seen (50 ms into it);\n"
+    "                       grip:K[:MS] MS ms after the gripper closes for the K-th time (a pick);\n"
+    "                       release:K[:MS] MS ms after it opens on a held object for the K-th time (a place);\n"
+    "                       pickturn:K[:MS] MS ms after the first spin seen after the K-th grip (the turn\n"
+    "                       after a pick). The last three do not depend on how a firmware moves its servos.\n"
+    "                       Repeatable.\n"
+    "    --bor=restart      a supply brown-out (--bod) restarts the firmware instead of ending the run\n"
+    "    --resetcause=N     the reset flags the restarted firmware reads (1 power-on [default, as in\n"
+    "                       the student's log], 2 reset button / USB, 4 brown-out)\n"
+    "    --maxresets=N      the run ends at the restart after the N-th (default 4)\n"
     "    --pseed=S          seed of the physics jitter (default fixed)\n"
     "  supply (the firmware's VCC measurement; not the motors: that is --sag)\n"
     "    VIN = vbat - rint x (ibase + imotor x duty/255 per driving motor + iservo while a servo\n"
@@ -666,7 +948,19 @@ static void usage() {
     "    --ibase=A --imotor=A --iservo=A --ihold=A   currents (default 0.12 0.30 0.60 0.15)\n"
     "    --bandgap=V        this chip's real bandgap, the firmware assumes 1.100 (default 1.100)\n"
     "    --bod=V            brown-out level (default 2.7)\n"
-    "    --vccadc=N         the bandgap reading is always N (0 or 1023: an emulator without it)\n");
+    "    --vccadc=N         the bandgap reading is always N (0 or 1023: an emulator without it)\n"
+    "  the student's robot (TT gear motors, TB6612, 9 V PP3, their measured bar; flags after it override)\n"
+    "    --student          best estimate: vmax 60, left gain 0.80, dead bands L 58/63 R 36/36 (fwd/back),\n"
+    "                       left 0.95 x weaker backward, tau 140/90 ms, dbrun 0.65, scrub 0.22 jit 0.15,\n"
+    "                       pivot 0.8 jit 0.3, sag 0.15 hold 0.05, slag 1.5, PP3 8.6 V 2.5 ohm, ibase 0.18,\n"
+    "                       the student's 8 white/black levels (as --chan), edge 1.0, noise 10\n"
+    "    --student-slow     the slow end: a tired PP3 (8.0 V 3.5 ohm), vmax 45, dead bands L 68/73 R 43,\n"
+    "                       tau 190, sag 0.25 hold 0.08 (the rest as --student)\n"
+    "    --student-fast     the fast end: a fresh PP3 (9.4 V 1.7 ohm), vmax 75, dead bands L 51/56 R 31,\n"
+    "                       tau 110, sag 0.10 hold 0.03 (the rest as --student)\n"
+    "                       After a preset: --trimL/--trim keep the backward ratio, --dbL/--dbR keep the\n"
+    "                       backward offset, --db sets all four dead bands, --white/--black replace its\n"
+    "                       channel levels, --weakch weakens one of them, --chan sets one channel.\n");
 }
 
 static bool flagVal(const char* arg, const char* name, const char** val) {
@@ -677,10 +971,180 @@ static bool flagVal(const char* arg, const char* name, const char** val) {
 }
 
 static const char* w_eepromFile = 0;
+static const char* w_rawPath = 0, *w_rawPart = 0;   // --rawfile, --rawpart
 static double w_startX = -5.0, w_startY = 0.0, w_startH = 0.0;
+
+// ---------------- --reset: the restart (see resetWatch) --------------------
+// The firmware's .noinit RAM that a restart keeps: runMark in the e33
+// sketches (its address survives a reset, not switching off). A firmware with
+// more of it names them all at build time: -DSIM_NOINIT_VARS='X(runMark) X(other)'
+#ifndef SIM_NOINIT_VARS
+  #ifdef RUN_MARK
+    #define SIM_NOINIT_VARS X(runMark)
+  #else
+    #define SIM_NOINIT_VARS
+  #endif
+#endif
+static void noinitSave(FILE* f) {
+#define X(v) { const unsigned char* p = (const unsigned char*)&(v); \
+               for (size_t i = 0; i < sizeof(v); i++) fprintf(f, " %02x", p[i]); }
+  SIM_NOINIT_VARS
+#undef X
+  fprintf(f, "\n");
+}
+static void noinitLoad(FILE* f) {
+#define X(v) { unsigned char* p = (unsigned char*)&(v); \
+               for (size_t i = 0; i < sizeof(v); i++) { unsigned b = 0; if (fscanf(f, "%x", &b) == 1) p[i] = (unsigned char)b; } }
+  SIM_NOINIT_VARS
+#undef X
+}
+static void resetFlagsSet(int f) {
+#ifdef RUN_MARK
+  resetFlags = (uint8_t)f;                     /* what the restarted firmware reads */
+#else
+  (void)f;
+#endif
+}
+
+static int    w_argc = 0;
+static char** w_argv = 0;
+static const char* w_resumeFile = 0;            // --resume=FILE: the state a restart left
+static int    w_resumeGripClosed = 0, w_resumeHeld = -1;
+static int    w_resumeServo[24];
+
+static void doReset(const char* why) {
+  w_resetsDone++;
+  logEvent("RESET   %s: the Nano restarts here (restart %d; EEPROM and the noinit RAM kept)", why, w_resetsDone);
+  if (w_resetsDone > w_maxResets) finishRun("too many restarts (--maxresets)");
+  char st[96], ee[96];
+  snprintf(st, sizeof st, "sim_reset_%lu_%d.state", (unsigned long)(w_t_us) ^ (unsigned long)(size_t)&w_rob, w_resetsDone);
+  snprintf(ee, sizeof ee, "%s.ee", st);
+  FILE* f = fopen(st, "w");
+  if (!f) { fprintf(stderr, "sim: --reset: cannot write %s\n", st); finishRun("restart failed"); }
+  fprintf(f, "%.17g %.17g %.17g %.17g %.17g\n", w_t_us, w_rob.x, w_rob.y, w_rob.th, w_rob.odo);
+  fprintf(f, "%d %d %d %d %d\n", (int)w_gripClosed, w_heldIdx, w_servoEp, w_spinEp, w_resetsDone);
+  fprintf(f, "%d\n", (int)w_objs.size());
+  for (size_t i = 0; i < w_objs.size(); i++)
+    fprintf(f, "%.17g %.17g %d %d\n", w_objs[i].x, w_objs[i].y, (int)w_objs[i].held, (int)w_objs[i].placed);
+  for (int i = 0; i < 24; i++) fprintf(f, "%d ", w_servoAngle[i]);
+  fprintf(f, "\n");
+  fprintf(f, "%d %d", w_gripEp, w_relEp);
+  for (int i = 0; i < 16; i++) fprintf(f, " %d", w_spinAtGrip[i]);
+  fprintf(f, "\n");
+  noinitSave(f);
+  fclose(f);
+  const char* eeUse = w_eepromFile ? w_eepromFile : ee;
+  EEPROM.save(eeUse);
+  // the same command line, minus the --reset that fired (and any old
+  // --resume), plus the state and the EEPROM
+  std::vector<std::string> args;
+  args.push_back(w_argv[0]);
+  for (int i = 1; i < w_argc; i++) {
+    if (!strncmp(w_argv[i], "--reset=", 8) || !strncmp(w_argv[i], "--resume=", 9)) continue;
+    args.push_back(w_argv[i]);
+  }
+  for (size_t i = 0; i < w_resets.size(); i++)
+    if (!w_resets[i].fired) args.push_back("--reset=" + w_resets[i].text);
+  args.push_back(std::string("--resume=") + st);
+  if (!w_eepromFile) args.push_back(std::string("--eeprom=") + ee);
+  std::vector<std::string> q(args);
+  std::vector<char*> av;
+  for (size_t i = 0; i < q.size(); i++) {
+    if (q[i].find(' ') != std::string::npos) q[i] = "\"" + q[i] + "\"";
+    av.push_back(&q[i][0]);
+  }
+  av.push_back(0);
+  fflush(stdout); fflush(stderr);
+  int rc = 2;
+#ifdef _WIN32
+  intptr_t r = _spawnv(_P_WAIT, w_argv[0], av.data());
+  rc = (r < 0) ? 2 : (int)r;
+#else
+  pid_t p = fork();
+  if (p == 0) { execv(w_argv[0], av.data()); _exit(127); }
+  int ws = 0;
+  if (p > 0 && waitpid(p, &ws, 0) > 0 && WIFEXITED(ws)) rc = WEXITSTATUS(ws);
+#endif
+  remove(st);
+  if (!w_eepromFile) remove(ee);
+  exit(rc);                                    /* the restarted copy printed the RESULT */
+}
+
+/* --resume: the state the restarted copy continues from */
+static bool resumeLoad(const char* path) {
+  FILE* f = fopen(path, "r");
+  if (!f) { fprintf(stderr, "sim: cannot open --resume=%s\n", path); return false; }
+  int nobj = 0, gc = 0;
+  bool ok = fscanf(f, "%lf %lf %lf %lf %lf", &w_t_us, &w_rob.x, &w_rob.y, &w_rob.th, &w_rob.odo) == 5 &&
+            fscanf(f, "%d %d %d %d %d", &gc, &w_resumeHeld, &w_servoEp, &w_spinEp, &w_resetsDone) == 5 &&
+            fscanf(f, "%d", &nobj) == 1 && nobj == (int)w_objs.size();
+  for (int i = 0; ok && i < nobj; i++) {
+    int h = 0, p = 0;
+    ok = fscanf(f, "%lf %lf %d %d", &w_objs[i].x, &w_objs[i].y, &h, &p) == 4;
+    w_objs[i].held = h; w_objs[i].placed = p;
+  }
+  for (int i = 0; ok && i < 24; i++) ok = fscanf(f, "%d", &w_resumeServo[i]) == 1;
+  ok = ok && fscanf(f, "%d %d", &w_gripEp, &w_relEp) == 2;
+  for (int i = 0; ok && i < 16; i++) ok = fscanf(f, "%d", &w_spinAtGrip[i]) == 1;
+  w_resumeGripClosed = gc;
+  if (ok) noinitLoad(f);
+  fclose(f);
+  if (!ok) fprintf(stderr, "sim: bad --resume=%s\n", path);
+  return ok;
+}
+
+// ---------------- --student presets: the student's robot --------------------
+// Values and the reasoning behind each are in studentsim/NOTES.md. In short:
+// yellow TT gear motors 1:48 (about 200 rpm no load at 6 V) on 65 mm wheels,
+// a TB6612 driven straight from a 9 V PP3 that sags under load (about 7.6 V
+// at the motors while cruising), the LEFT motor weaker (the student saw
+// 270 deg against 360 deg; "speed 50 did not move your left wheel"),
+// SG90-class servos on the Nano's 5 V, and the student's measured bar.
+// The three presets differ in the battery (and so in speed, dead bands, lag
+// and sag); the mechanics and the sensors are the same in all three.
+struct StudentPreset {
+  const char* name;
+  double vmax, dbL, dbR, tau, sag, sagHold, vbat, rint;
+};
+static const StudentPreset w_students[3] = {
+  {"student",      60, 58, 36, 140, 0.15, 0.05, 8.6, 2.5},   // best estimate
+  {"student-slow", 45, 68, 43, 190, 0.25, 0.08, 8.0, 3.5},   // tired PP3, slower motors
+  {"student-fast", 75, 51, 31, 110, 0.10, 0.03, 9.4, 1.7},   // fresh PP3, faster motors
+};
+// the student's own levels (Serial printouts: black 964-976, white 72-203)
+static const double w_studentW[8] = {203, 158, 74, 77, 72, 96, 99, 99};
+static const double w_studentB[8] = {970, 971, 965, 966, 966, 975, 971, 971};
+static int    w_preset = -1;                 // which preset was given last (-1 none)
+static bool   w_chPreset[8];                 // channel levels set by the preset
+static bool   w_psDb = false;                // backward dead bands follow the forward ones
+static double w_psDbOffL = 0, w_psDbOffR = 0;  // ... by this much
+static double w_psRevL = -1, w_psRevR = -1;    // backward gain = this x forward gain
+
+static void applyStudent(int k) {
+  const StudentPreset& p = w_students[k];
+  w_preset = k;
+  CFG.vMax = p.vmax;
+  CFG.trimL = 0.80; CFG.trimR = 1.00;          // slope above the dead band (0.75 was seen at duty 120)
+  CFG.trimLrev = -1; CFG.trimRrev = -1;        // resolved after the flags: 0.95 x / 1.00 x forward
+  w_psRevL = 0.95; w_psRevR = 1.00;
+  CFG.dbL = p.dbL; CFG.dbR = p.dbR;
+  CFG.dbLrev = -1; CFG.dbRrev = -1;            // resolved after the flags: forward + 5 / + 0
+  w_psDb = true; w_psDbOffL = 5; w_psDbOffR = 0;
+  CFG.tau = p.tau; CFG.taub = 90; CFG.dbRun = 0.65;
+  CFG.scrub = 0.22; CFG.spinJit = 0.15; CFG.pivot = 0.8; CFG.pivotJit = 0.3;
+  CFG.sag = p.sag; CFG.sagHold = p.sagHold; CFG.sensLag = 1.5;
+  CFG.vbat = p.vbat; CFG.rint = p.rint; CFG.iBase = 0.18;
+  w_supplySet = true;
+  for (int c = 0; c < 8; c++) {
+    w_chSet[c] = true; w_chPreset[c] = true;
+    w_chSetW[c] = w_studentW[c]; w_chSetB[c] = w_studentB[c];
+  }
+  CFG.edge = 1.0; CFG.noise = 10;
+}
 
 int main(int argc, char** argv) {
   double& maxSimSec = w_maxSimSec;
+  w_argc = argc; w_argv = argv;                 /* (--reset starts a copy with them) */
   for (int i = 1; i < argc; i++) {
     const char* v = 0;
     if (!strcmp(argv[i], "--quiet")) w_verbose = false;
@@ -695,11 +1159,23 @@ int main(int argc, char** argv) {
     else if (!strncmp(argv[i], "--secs=", 7)) maxSimSec = atof(argv[i] + 7);
     /* ---- real-robot effects, all default OFF ---- */
     else if (flagVal(argv[i], "--trimL=", &v))    CFG.trimL = atof(v);
-    else if (flagVal(argv[i], "--db=", &v))       CFG.deadband = atof(v);
+    else if (flagVal(argv[i], "--db=", &v)) {
+      CFG.deadband = atof(v);
+      if (w_psDb) { CFG.dbL = CFG.dbR = CFG.dbLrev = CFG.dbRrev = -1; w_psDb = false; }   /* after a preset: all four */
+    }
+    else if (flagVal(argv[i], "--dbLr=", &v))     CFG.dbLrev = atof(v);
+    else if (flagVal(argv[i], "--dbRr=", &v))     CFG.dbRrev = atof(v);
+    else if (flagVal(argv[i], "--track=", &v))    CFG.track = atof(v);
+    else if (!strcmp(argv[i], "--student"))       applyStudent(0);
+    else if (!strcmp(argv[i], "--student-slow"))  applyStudent(1);
+    else if (!strcmp(argv[i], "--student-fast"))  applyStudent(2);
     else if (flagVal(argv[i], "--dbL=", &v))      CFG.dbL = atof(v);
     else if (flagVal(argv[i], "--dbR=", &v))      CFG.dbR = atof(v);
-    else if (flagVal(argv[i], "--white=", &v))    CFG.white = atof(v);
-    else if (flagVal(argv[i], "--black=", &v))    CFG.black = atof(v);
+    else if (flagVal(argv[i], "--white=", &v) || flagVal(argv[i], "--black=", &v)) {
+      (argv[i][2] == 'w' ? CFG.white : CFG.black) = atof(v);
+      for (int k = 0; k < 8; k++)              /* after a preset: these replace its levels */
+        if (w_chPreset[k]) { w_chPreset[k] = false; w_chSet[k] = false; }
+    }
     else if (flagVal(argv[i], "--weakgain=", &v)) CFG.weakGain = atof(v);
     else if (flagVal(argv[i], "--edge=", &v))     CFG.edge = atof(v);
     else if (flagVal(argv[i], "--noise=", &v))    CFG.noise = atof(v);
@@ -712,6 +1188,9 @@ int main(int argc, char** argv) {
     else if (flagVal(argv[i], "--starth=", &v))   w_startH = atof(v);
     else if (flagVal(argv[i], "--eeprom=", &v))   w_eepromFile = v;
     else if (flagVal(argv[i], "--still=", &v))    w_stillSec = atof(v);
+    else if (flagVal(argv[i], "--rawfile=", &v))  w_rawPath = v;
+    else if (flagVal(argv[i], "--rawpart=", &v))  w_rawPart = v;
+    else if (flagVal(argv[i], "--rawhold=", &v))  w_rawHoldMs = atof(v) > 0 ? atof(v) : 1000.0;
     else if (flagVal(argv[i], "--tau=", &v))      CFG.tau = atof(v);
     else if (flagVal(argv[i], "--trace=", &v))    sscanf(v, "%lf:%lf", &w_trT0, &w_trT1);
     else if (flagVal(argv[i], "--taub=", &v))     CFG.taub = atof(v);
@@ -723,6 +1202,22 @@ int main(int argc, char** argv) {
     else if (flagVal(argv[i], "--sag=", &v))      CFG.sag = atof(v);
     else if (flagVal(argv[i], "--saghold=", &v))  CFG.sagHold = atof(v);
     else if (flagVal(argv[i], "--slag=", &v))     CFG.sensLag = atof(v);
+    else if (flagVal(argv[i], "--lift=", &v)) {
+      if (sscanf(v, "%lf:%lf", &CFG.lift, &CFG.liftMs) < 1) { fprintf(stderr, "sim: bad --lift=%s (G[:MS])\n", v); return 2; }
+    }
+    else if (flagVal(argv[i], "--reset=", &v)) {
+      ResetSpec r; r.a = 0; r.ms = 0; r.armed = r.fired = false; r.tFire = 0; r.text = v;
+      char k[16] = "";
+      int got = sscanf(v, "%15[a-z]:%lf:%lf", k, &r.a, &r.ms);
+      r.kind = !strcmp(k, "t") ? 't' : !strcmp(k, "n") ? 'n' : !strcmp(k, "servo") ? 's' : !strcmp(k, "spin") ? 'p' :
+               !strcmp(k, "grip") ? 'g' : !strcmp(k, "release") ? 'r' : !strcmp(k, "pickturn") ? 'k' : 0;
+      if (got < 2 || !r.kind) { fprintf(stderr, "sim: bad --reset=%s (t:T, n:N[:MS], servo:K[:MS], spin:K[:MS], grip:K[:MS], release:K[:MS], pickturn:K[:MS])\n", v); return 2; }
+      w_resets.push_back(r);
+    }
+    else if (!strcmp(argv[i], "--bor=restart"))   w_borRestart = true;
+    else if (flagVal(argv[i], "--resetcause=", &v)) w_resetCause = atoi(v);
+    else if (flagVal(argv[i], "--maxresets=", &v))  w_maxResets = atoi(v);
+    else if (flagVal(argv[i], "--resume=", &v))     w_resumeFile = v;
     else if (flagVal(argv[i], "--erase=", &v)) {
       Erase e; e.t0 = 0; e.t1 = 1e9;
       if (sscanf(v, "%lf:%lf:%lf:%lf:%lf", &e.x, &e.y, &e.r, &e.t0, &e.t1) >= 3) w_erase.push_back(e);
@@ -733,6 +1228,23 @@ int main(int argc, char** argv) {
       bool white = argv[i][2] == 'w';
       if (sscanf(v, "%lf:%lf:%lf:%lf", &q.x, &q.y, &q.hw, &q.hh) == 4) (white ? w_wipe : w_patch).push_back(q);
       else fprintf(stderr, "sim: bad %s (X:Y:HW:HH)\n", argv[i]);
+    }
+    else if (flagVal(argv[i], "--objoff=", &v)) {
+      char nm[8]; ObjOff q;
+      if (sscanf(v, "%7[^:]:%lf:%lf", nm, &q.dx, &q.dy) == 3) { q.name = nm; w_objOff.push_back(q); }
+      else { fprintf(stderr, "sim: bad --objoff=%s (NAME:DX:DY)\n", v); return 2; }
+    }
+    else if (flagVal(argv[i], "--gripr=", &v))    CFG.gripRadius = atof(v);
+    else if (flagVal(argv[i], "--wzone=", &v)) {
+      WZone z; z.mask = 0xff;
+      if (sscanf(v, "%lf:%lf:%lf:%lf:%lf:%x", &z.x, &z.y, &z.hw, &z.hh, &z.dw, &z.mask) >= 5) w_wzone.push_back(z);
+      else { fprintf(stderr, "sim: bad --wzone=%s (X:Y:HW:HH:DW[:MASK])\n", v); return 2; }
+    }
+    else if (flagVal(argv[i], "--wshift=", &v) || flagVal(argv[i], "--bshift=", &v)) {
+      LShift q; q.mask = 0xff;
+      bool wh = argv[i][2] == 'w';
+      if (sscanf(v, "%lf:%lf:%lf:%x", &q.dw, &q.t0, &q.t1, &q.mask) >= 3) (wh ? w_wshift : w_bshift).push_back(q);
+      else { fprintf(stderr, "sim: bad %s (DW:T0:T1[:MASK])\n", argv[i]); return 2; }
     }
     else if (flagVal(argv[i], "--pseed=", &v))    w_prng = strtoull(v, 0, 10) * 0x9E3779B97F4A7C15ULL + 1;
     else if (flagVal(argv[i], "--vbat=", &v))     { CFG.vbat = atof(v); w_supplySet = true; }
@@ -771,7 +1283,7 @@ int main(int argc, char** argv) {
       if (sscanf(v, "%d:%lf:%lf", &k, &cw, &cb) != 3 || k < 0 || k > 7) {
         fprintf(stderr, "sim: --chan wants K:W:B with K 0..7, got %s\n", v); return 2;
       }
-      w_chSet[k] = true; w_chSetW[k] = cw; w_chSetB[k] = cb;
+      w_chSet[k] = true; w_chSetW[k] = cw; w_chSetB[k] = cb; w_chPreset[k] = false;
     }
     else fprintf(stderr, "sim: ignoring unknown flag %s (see --help)\n", argv[i]);
   }
@@ -779,14 +1291,23 @@ int main(int argc, char** argv) {
   // Resolve per-motor dead bands and per-channel sensor levels.
   if (CFG.dbL < 0) CFG.dbL = CFG.deadband;
   if (CFG.dbR < 0) CFG.dbR = CFG.deadband;
+  if (w_psDb) {                                /* a preset: backward follows forward */
+    if (CFG.dbLrev < 0) CFG.dbLrev = CFG.dbL + w_psDbOffL;
+    if (CFG.dbRrev < 0) CFG.dbRrev = CFG.dbR + w_psDbOffR;
+  }
+  if (w_psRevL > 0 && CFG.trimLrev < 0) CFG.trimLrev = w_psRevL * CFG.trimL;
+  if (w_psRevR > 0 && CFG.trimRrev < 0) CFG.trimRrev = w_psRevR * CFG.trimR;
   for (int k = 0; k < 8; k++) {
     w_chWhite[k] = CFG.white;
     w_chBlack[k] = CFG.black;
     if (CFG.weakMask & (1u << k))
       w_chBlack[k] = w_chWhite[k] + (w_chBlack[k] - w_chWhite[k]) * CFG.weakGain;
     if (w_chSet[k]) { w_chWhite[k] = w_chSetW[k]; w_chBlack[k] = w_chSetB[k]; }
+    if (w_chPreset[k] && (CFG.weakMask & (1u << k)))   /* --weakch with a preset: weaken its level */
+      w_chBlack[k] = w_chWhite[k] + (w_chBlack[k] - w_chWhite[k]) * CFG.weakGain;
   }
   w_rng = CFG.seed ? (unsigned long long)CFG.seed : 0x9E3779B97F4A7C15ULL;  /* xorshift must not start at 0 */
+  if (w_rawPath && !loadRawFile(w_rawPath, w_rawPart)) return 2;
 
   for (int i = 0; i < 24; i++) { w_digital[i] = 0; w_pwm[i] = 0; w_servoAngle[i] = 90; }
   buildField();
@@ -794,18 +1315,38 @@ int main(int argc, char** argv) {
   // start pose: on the MID line at C1, facing east, bar just past the C1 crossing
   w_rob.x = w_startX; w_rob.y = w_startY; w_rob.th = w_startH * M_PI / 180.0;
   if (w_eepromFile) EEPROM.load(w_eepromFile);
+  if (w_resumeFile) {                          /* --reset: the restarted copy */
+    if (!resumeLoad(w_resumeFile)) return 2;
+    for (int i = 0; i < 24; i++) w_servoAngle[i] = w_resumeServo[i];
+    w_gripClosed = w_resumeGripClosed != 0;
+    w_heldIdx = w_resumeHeld;
+    resetFlagsSet(w_resetCause);
+    logEvent("RESUME  restart %d: the firmware starts again from setup() at pose=(%.1f, %.1f) heading=%.0fdeg%s",
+             w_resetsDone, w_rob.x, w_rob.y, w_rob.th * 180 / M_PI, w_heldIdx >= 0 ? ", the object still in the jaws" : "");
+  }
+  w_odoAtStart = w_rob.odo;
+  if (!w_resets.empty()) w_countFn = simPathCount;
   logEvent("START   pose=(%.1f, %.1f) heading=%.0fdeg  sensorAhead=%.1fcm cell=%.0fcm",
            w_rob.x, w_rob.y, w_rob.th * 180 / M_PI, CFG.sensorAhead, CFG.cell);
 
-  // Only when a realism effect is on, say so -- default output stays byte-identical.
+  if (w_preset >= 0)
+    logEvent("PRESET  --%s (the student's robot: TT motors, TB6612, 9 V PP3; flags after it override)",
+             w_students[w_preset].name);
+  // Only when a realism effect is on, say so: default output stays byte-identical.
   bool motorFx = CFG.trimL != 1.0 || CFG.dbL != 25.0 || CFG.dbR != 25.0 ||
-                 CFG.trimLrev >= 0 || CFG.trimRrev >= 0;
+                 CFG.trimLrev >= 0 || CFG.trimRrev >= 0 || CFG.dbLrev >= 0 || CFG.dbRrev >= 0;
   bool sensFx = false;
   for (int k = 0; k < 8; k++) if (w_chWhite[k] != 100.0 || w_chBlack[k] != 900.0) sensFx = true;
   if (CFG.edge > 0 || CFG.noise > 0) sensFx = true;
   if (motorFx)
     logEvent("MOTORS  left gain %.2f dead band %.0f | right gain %.2f dead band %.0f | vmax %.0f cm/s",
              CFG.trimL, CFG.dbL, CFG.trimR, CFG.dbR, CFG.vMax);
+  if (CFG.dbLrev >= 0 || CFG.dbRrev >= 0 || w_preset >= 0)   /* (only with --dbLr/--dbRr or a preset) */
+    logEvent("MOTORS  backward: left gain %.2f dead band %.0f | right gain %.2f dead band %.0f",
+             CFG.trimLrev >= 0 ? CFG.trimLrev : CFG.trimL, CFG.dbLrev >= 0 ? CFG.dbLrev : CFG.dbL,
+             CFG.trimRrev >= 0 ? CFG.trimRrev : CFG.trimR, CFG.dbRrev >= 0 ? CFG.dbRrev : CFG.dbR);
+  if (CFG.track != 11.0)
+    logEvent("GEOMETRY track %.1f cm", CFG.track);
   if (sensFx) {
     char buf[200]; int n = 0;
     for (int k = 0; k < 8; k++)
@@ -821,12 +1362,29 @@ int main(int argc, char** argv) {
              CFG.tau, CFG.taub >= 0 ? CFG.taub : 0.75 * CFG.tau, CFG.dbRun, CFG.scrub, CFG.spinJit,
              CFG.pivot, CFG.pivotJit, CFG.sag, CFG.sagHold, CFG.sensLag);
 
+  if (CFG.lift > 0)                            /* (only with --lift) */
+    logEvent("LIFT    the bar reads %.2f of the way darker per m/s^2 of forward acceleration (smoothed %.0f ms)",
+             CFG.lift, CFG.liftMs);
+  if (!w_resets.empty() || w_borRestart) {     /* (only with --reset or --bor=restart) */
+    std::string t;
+    for (size_t i = 0; i < w_resets.size(); i++) t += " " + w_resets[i].text;
+    logEvent("RESETS  mid-run restarts:%s%s (the restarted firmware reads reset flags %d)", t.c_str(),
+             w_borRestart ? " and at a supply brown-out" : "", w_resetCause);
+  }
   // (only when a supply flag was given: --real alone keeps its output as before)
   if (w_supplySet)
     logEvent("SUPPLY  battery %.2f V %.2f ohm, dropout %.2f V; A: base %.2f motor %.2f servo %.2f hold %.2f; bandgap %.3f V, brown-out %.2f V%s",
              CFG.vbat, CFG.rint, CFG.ldo, CFG.iBase, CFG.iMotor, CFG.iServo, CFG.iHold, CFG.bandgap, CFG.bod,
              CFG.vccAdc >= 0 ? " (bandgap reading forced)" : "");
 
+  if (!w_objOff.empty() || CFG.gripRadius != 3.5 || !w_wzone.empty() || !w_wshift.empty() || !w_bshift.empty()) {
+    logEvent("FIELDVAR grip radius %.2f cm, %d moved, %d white zones, %d white shifts, %d black shifts",
+             CFG.gripRadius, (int)w_objOff.size(), (int)w_wzone.size(), (int)w_wshift.size(), (int)w_bshift.size());
+    for (size_t i = 0; i < w_objs.size(); i++)
+      logEvent("FIELDVAR %s at (%.2f, %.2f)", w_objs[i].name.c_str(), w_objs[i].x, w_objs[i].y);
+    for (size_t i = 0; i < w_targets.size(); i++)
+      logEvent("FIELDVAR %s at (%.2f, %.2f)", w_targets[i].name.c_str(), w_targets[i].x, w_targets[i].y);
+  }
   /* --path: the geometry sim/path_check.py needs to know where every count must happen */
   if (w_pathCount) {
     w_pathExtra = simPathExtra;

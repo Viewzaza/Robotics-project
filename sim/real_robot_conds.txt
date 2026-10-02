@@ -1,0 +1,65 @@
+# real_robot_conds.txt: conditions that model the student's real robot (sim/real_robot_test.sh reads this).
+#
+# Every condition comes from the log of the 19 real runs (real_runs_log.txt; the analysis is in the
+# forensics NOTES: r16/forensics/NOTES.md and runs.md). "run N" below is the N-th "MISSION: go" of that log.
+#
+# Format, one condition per line:
+#   name | routes | sim flags | why (from the log)
+# routes: 312 (the order the student uses), 132, or 312,132 (both: where the route changes what happens).
+# @NAME = flags   defines a short name; $NAME in a line is replaced by it.
+# Lines starting with # are comments.
+#
+# REALM: the robot fitted to the real runs (forensics fit5.tsv): the old firmware in the sim then turns
+# L90 635 / R90 617 / L180 1160 ms and cruises at vScale 1.76-1.81, the real robot L90 650 / R90 563 /
+# L180 1100 ms and 1.64-1.81. Its first crossing comes at d=8.0 with the wheels 5 cm past C1, the real
+# runs at d=6.6-8.9: so the real placement is --startx=5 (the sim's x is the axle, C1 = 0).
+@REALM = --student --vmax=65 --tau=90 --scrub=0.05 --dbL=38 --dbR=24 --trimL=0.80 --trimLr=0.76
+@X = --startx=5
+# The real white levels at the start of runs 4, 5 and 16 (A0..A7 over white, the line read ~860-960):
+@TILT4  = --chan=0:651:960 --chan=1:456:960 --chan=2:400:960 --chan=3:360:960 --chan=4:336:960 --chan=5:249:960 --chan=6:216:960 --chan=7:208:960
+@TILT5  = --chan=0:656:960 --chan=1:428:960 --chan=2:330:960 --chan=3:280:960 --chan=4:242:960 --chan=5:157:960 --chan=6:149:960 --chan=7:130:960
+@TILT16 = --chan=0:625:960 --chan=1:194:960 --chan=2:133:960 --chan=3:120:960 --chan=4:110:960 --chan=5:211:960 --chan=6:146:960 --chan=7:80:960
+
+# ---- the robot itself
+realm        | 312,132 | $REALM $X              | the fit to the 19 runs: turn times, cruise speed and the first crossing at d=6.6-8.9 all match
+student      | 312,132 | --student $X           | the --student preset (best estimate before the log): a second model of the same robot
+student-slow | 312,132 | --student-slow $X      | the slow end of the preset (tired PP3, slower motors, bigger dead bands)
+student-fast | 312,132 | --student-fast $X      | the fast end of the preset (fresh PP3); real cruise vScale reached 2.3-2.5 in runs 5 and 15
+
+# ---- where the student puts the robot down
+place-x-4    | 312,132 | $REALM --startx=-4     | wheels 4 cm before C1 (the bar 5.5 cm past C1): the near end of the -4..8 cm a student may put it down in
+place-x0     | 312,132 | $REALM --startx=0      | wheels over C1 (what e33_mission asks for); run 4's n=1 at d=11.6 means about 1.5 cm past C1
+place-x8     | 312,132 | $REALM --startx=8      | wheels 8 cm past C1: a little beyond the far end seen (run 10's n=1 at d=6.6 means about 6.5 cm past C1)
+
+# ---- the sensor bar
+a0-stuck     | 312,132 | $REALM $X --chan=0:640:950 | A0 reads ~590-670 on white from run 3 on (it still rises on black): a stuck-high left sensor
+a0-drift     | 312     | $REALM $X --wshift=440:0:6:01 | run 3: A0 drifted 176 -> 615 while it stood at the start, then FAULT 6 at n=3 with bar 10000000 (A0 stuck on)
+tilt-run4    | 312,132 | $REALM $X $TILT4       | run 4's whites {651,456,...,208}: the bar tilted, left end high; runs 4,7,8,10 had A0 lit on crossings
+tilt-run5    | 312     | $REALM $X $TILT5       | run 5's whites {656,428,...,130} (FAULT 2: on a crossing too long, bar 01111111)
+tilt-run16   | 312     | $REALM $X $TILT16      | run 16's whites {625,194,...,80} (FAULT 2 at n=5, masks 00111111)
+
+# ---- the false crossing after a standing start (--lift)
+lift         | 312,132 | $REALM $X --lift=0.6   | false "crossings" 1.4-2.3 cm after the start and 1.3-4.6 cm after turns; G 0.6 reproduced run 1 (n=7 turn at d=2.0 after the 180, then a FAULT at n=9)
+lift-strong  | 312,132 | $REALM $X --lift=0.8:150 | the same, stronger and longer (the other fit of run 1); real d of the false counts up to 4.6 cm
+lift-tilt4   | 312     | $REALM $X $TILT4 --lift=0.6 | run 4's start as a whole: tilted whites and the false crossing (real masks 00111111/00011111)
+
+# ---- the Nano restarting in the middle of a run (--reset; the real restarts read "power-on")
+rst-turn1    | 312,132 | $REALM $X --reset=spin:1:200      | runs 7, 10, 12: restart in the FIRST turn (no servo moving: motor start current on a weak PP3)
+rst-pick1    | 312,132 | $REALM $X --reset=grip:1:150      | run 4: PICK at n=5 (VCC min 4.52 V), then "RESTARTED here"
+rst-pick180  | 312,132 | $REALM $X --reset=pickturn:1:300  | runs 4 and 11: restart in the 180 after the pick (gap-turn rescue printed, L180 2052 ms)
+rst-place1   | 312,132 | $REALM $X --reset=release:1:100   | run 6: the place at n=12 pulled VCC to 4.48 V (LOW) and the Nano restarted 4 counts later; a place moves the same servos as a pick
+rst-twice    | 312     | $REALM $X --reset=grip:1:150 --reset=pickturn:2:300 | a weak PP3 restarts at more than one pick (runs 4, 6, 11 each restarted at a pick or place)
+
+# ---- the battery (one PP3 for motors, Nano and servos)
+tired        | 312,132 | $REALM $X --vmax=44 --vbat=6.6 --rint=3.5 --bor=restart --maxresets=2 | runs 12 and 14: rest 4.83 V (a flat PP3), cruise vScale 1.16 (not 1.7); run 12 restarted at its first turn
+bor-servo    | 312,132 | $REALM $X --vbat=7.2 --rint=4 --bor=restart --maxresets=2 | a weak PP3 (4 ohm): a servo moving while the gripper holds an object pulls the 5 V under the reset level (2.7 V), so every pick restarts the Nano (runs 4, 11: VCC min 4.52/4.54 V at the pick, then the restart)
+
+# ---- worn tape (like the r11 bughunt set: holes on crossings, on the 180's sensor circle, beside the line)
+gap-c2mid    | 312     | $REALM $X --erase=25:0:1.2   | a worn crossing (2.4 cm hole) at C2 MID; the bar lost the line in turns of runs 2, 3, 4, 9, 10, 13, 18 (GAP-TURN rescues)
+gap-c3mid-big| 312     | $REALM $X --erase=50:0:2.5   | a 5 cm hole at C3 MID (bughunt: a known limit, should end in a safe fault, not a wrong place)
+gap-c4top180 | 312     | $REALM $X --erase=75:11:1.5  | a hole where the 180 after pick 1 sweeps the bar over C4 (runs 9, 11, 13, 18: 180s of 1659-2500 ms against ~1000)
+gap-c1bot180 | 312     | $REALM $X --erase=0:-11:1.5  | a hole where the 180 after the C1 BOT pick sweeps the bar over C1
+gap-seg      | 312     | $REALM $X --erase=31:0:1.5   | a 3 cm hole just past C2 on MID (the line is lost for a moment while following)
+gap-col      | 312     | $REALM $X --erase=0:6:1.5    | a hole on C1 just north of MID (the line out of the first left turn)
+mark-c1      | 312     | $REALM $X --patch=12:2.5:1:1 | a black mark beside MID after C1 (runs 2, 3, 9, 13, 18 printed "a mark beside the line?" rejects)
+mark-c2      | 312     | $REALM $X --patch=37:-2.5:1:1 | a black mark beside MID after C2

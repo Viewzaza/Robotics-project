@@ -77,11 +77,11 @@ details summary{cursor:pointer;color:var(--muted)}
 </main>
 
 <script id="core">
-/* E33 log reader: parse and analyse what robot_e33_v2 prints on Serial.
+/* E33 log reader: parse and analyse what e33_mission and e33_calibrate print on Serial.
    The formats follow runLog.h logPrint, controlLibrary.h traceEvent, traceTurn,
    fault, printCalSource, printResetCause and beginFnc, the ino's startMission and
    finishMission, checkModes.h (sensor report, gripper check) and
-   calibrationMode.h (calibration report). No browser code in this script, so
+   calibrationMode.h (calibration report), and the turn check. No browser code in this script, so
    node can load it for the tests. */
 (function(root){
 'use strict';
@@ -128,6 +128,15 @@ var KNOWN = [
   '(anything not PASS or WEAK: the mission uses the default for it)',
   '(not finished: do not paste these)',
   'To freeze these values: paste over CAL VALUES in calibration.h, set CAL_USE_EEPROM 0',
+  'Optional, to freeze these values: paste them over the CAL VALUES of calibration.h, set CAL_USE_EEPROM 0, run copy_settings.bat',
+  'Optional: paste this block over the CAL VALUES of calibration.h and set CAL_USE_EEPROM 0',
+  '(from EEPROM: the measured lists are only in the printout at the end of the run)',
+  '(the rest is kept from the last calibration)',
+  'waiting: lift the robot, wheels off the ground (the sensors then read black)',
+  '(some channels stand out the OTHER way: is CAL_LINE_LOW right? MODE_SENSOR_CHECK tells)',
+  'same 4 lines in calibration.h, paste over them, then run tools\\copy_settings.bat):',
+  'step back: it turns once the line is steady',
+  '(printed again from EEPROM: the lists measured on the way are only in the printout at the end of the run)',
   'Four steps, then a report to copy and send (from BEGIN to END).',
   'hand, wheels on the table (do not lift it: a lifted bar reads black), so the',
   'line passes under EVERY sensor, A0 to A7 and back. It watches for 15 s.',
@@ -148,9 +157,14 @@ var KNOWN = [
   'one jaw and the object. Press + until the strip is held. That angle is where the',
   'jaws touch. After closing, the mission opens GRIP_BACKOFF_DEG again to hold, so',
   '(Several at once: +++++ and Enter = 5 degrees.)',
-  'Slide the robot over white, over the line, over a crossing.'
+  'Slide the robot over white, over the line, over a crossing.',
+  'Slide the robot over white, over the line, over a crossing (10 lines a second;',
+  'every 3 s the lowest and highest each sensor read, so a line passing fast still shows).',
+  'turn: new road not seen (a gap?): 5 cm on, then back'
 ];
 var KNOWN_RE = [
+  /^SETTINGS: route \d+, PRACTICE \d+, CELL_CM /,
+  /^FAST ROBOT: set MAX_SP MOVE_SP TURN_SP TURN_SLOW_SP SP_START to about \d+% of now, calibrate again$/,
   /^press Enter in the Serial Monitor when ready \(or wait \d+ s\)$/,
   /^STEP \d of 4: /,
   /^set GRIP_CLOSED \d+ degrees tighter/
@@ -185,7 +199,7 @@ var RE = {
   calItem: /^(sensors|deadband|trim|move|cruise|turn|spin) \[([^\]]+)\] ?(.*)$/,
   calDefine: /^#define CAL_(\w+) (.*)$/,
   calEnd: /^\/\* -+ end CAL VALUES -+ \*\/$/,
-  calDone: /^(Done\. Set ROBOT_MODE|NOT FINISHED: )/,
+  calDone: /^(Done\. (Set ROBOT_MODE|Now upload)|NOT FINISHED: )/,
   calSaved: /^saved in EEPROM at (\d+), (read back OK|READ BACK FAILED)/,
   calStep: /^step (\d): (.*)$/,
   calDuty: /^(left|right) (forward|backward) (starts at duty (\d+)|did NOT move by duty 220|moved the WRONG way)$/,
@@ -205,6 +219,10 @@ var RE = {
   gcBar: /^bar A0\.\.A7:((?: \d+){8})$/,
   gcUnknownKey: /^unknown key: /,
   meter: /^SENSOR METER: /,
+  tcStart: /^=== TURN CHECK: /,
+  tcLine: /^turn (\d+)\/(\d+) ([LR])(90|180) (\d+) ms \(expected (\d+)\) lines passed (\d+) \(should be (\d+)\) bar ([01]{8}) error (\S+) (OK|SLOW|FAST|EXTRA LINE|OFF LINE|FAILED)$/,
+  tcBegin: /^=== E33 TURN CHECK BEGIN/,
+  tcEnd: /^=== E33 TURN CHECK END/,
   motor: /^MOTOR CHECK: /,
   simLine: /^\[\s*[\d.]+s\] |^\.\.\. pose=/,
   simResult: /^=+ RESULT =+$/
@@ -237,6 +255,15 @@ function parseRecord(t, n, rest){
     r.type = w === 'CROSS' ? 'CROSS' : /^REJECT/.test(w) ? 'REJECT' : /^MISSED/.test(w) ? 'CREDIT' : 'ENDLOST';
     r.d = num(take('d')); r.exp = num(take('expected')); r.mask = take('mask') || '';
     r.ahead = take('ahead') || ''; r.v = num(take('v'));
+  }else if(/^RECOVER-MARK/.test(w)){
+    /* a half crossing before the crossing was due, not counted: the mission went on (FAULT 3 otherwise) */
+    r.type = 'RECMARK';
+    r.d = num(take('d')); r.exp = num(take('expected')); r.mask = take('mask') || '';
+    r.ahead = take('ahead') || ''; r.v = num(take('v'));
+  }else if(/^RECOVER-TURN/.test(w)){
+    /* no line in the middle after a turn: one more try with longer nudges (FAULT 7 otherwise) */
+    r.type = 'RECTURN'; r.moved = num(take('moved3cm')); r.found = num(take('found'));
+    r.mask = take('bar-before') || ''; r.after = take('bar-after') || '';
   }else if(w === 'TURN'){
     var tm = /^TURN (LEFT|RIGHT) (90|180)/.exec(rest);
     r.type = 'TURN'; r.dir = tm ? tm[1] : '?'; r.deg = tm ? +tm[2] : 0;
@@ -275,6 +302,8 @@ function traceType(what){
   if(/^RETRY/.test(what)) return 'RETRY';
   if(what === 'missed') return 'MISSED';
   if(what === 'half crossing') return 'HALF';
+  if(what === 'RECOVER turn') return 'RECTURN';
+  if(what === 'RECOVER mark') return 'RECMARK';
   return 'TRACE';
 }
 
@@ -349,8 +378,9 @@ function parse(text){
       if((m = RE.calItem.exec(t))){ b.items.push({ name: m[1], status: m[2], text: m[3] }); return true; }
       if((m = RE.calDefine.exec(t))){ b.defines.push(t); return true; }
       if((m = RE.calSaved.exec(t))){ b.saved = m[2]; return true; }
-      if(RE.calEnd.test(t)){ b.defines.push(t); return true; }
+      if(RE.calEnd.test(t)){ b.defines.push(t); b.ended = true; return true; }
       if(RE.calDone.test(t)){ b.ended = true; b.finished = /^Done/.test(t); cur = null; return true; }
+      if(/^NOTE: CAL_USE_EEPROM is 0/.test(t)){ b.eepromOff = true; return true; }
       return false;
     }
     if(b.kind === 'sensorcheck'){
@@ -390,6 +420,18 @@ function parse(text){
       if(RE.gcUnknownKey.test(t)){ b.badKeys++; return true; }
       return false;
     }
+    if(b.kind === 'turncheck'){
+      if(RE.tcEnd.test(t)){ b.ended = true; return true; }
+      if(RE.tcBegin.test(t)){ b.report = true; return true; }
+      if((m = RE.tcLine.exec(t))){ b.turns.push({ i: +m[1], of: +m[2], name: m[3] + m[4], ms: +m[5], exp: +m[6], status: m[11] }); return true; }
+      if(RE.turn.test(t)) return true;            /* the library's own line before each turn line */
+      if(b.report && /^- /.test(t)){ b.verdict.push(t.slice(2)); return true; }
+      if(b.report && /^(levels and turn times|TURN_SP |turns done |turn,done,|[LR](90|180),|axle off the crossing)/.test(t)){ b.table.push(t); return true; }
+      if(b.report && t === 'verdict:') return true;
+      if(/^(waiting for the line steady|bar [01]{8} |TURN CHECK: go$|NOT CALIBRATED: )/.test(t)) return true;
+      if(/^(Put the WHEELS|facing along MID|Turns: 4 x left 90|then prints a report to copy|Press Enter to do the check again)/.test(t)) return true;
+      return false;
+    }
     if(b.kind === 'meter' || b.kind === 'motor'){ b.count++; return 'late'; }
     if(b.kind === 'simresult'){ R.sim++; return true; }
     return false;
@@ -422,6 +464,7 @@ function parse(text){
     if(RE.srBegin.test(t)){ closeOpen(); var sr = open('sensor', no, { rows: [], notes: [], chNotes: [], defines: [], cols: null }); if(lastSc && !lastSc.report){ lastSc.report = sr; sr.check = lastSc; } return true; }
     if(RE.gcStart.test(t)){ closeOpen(); open('gripper', no, { prints: [], badKeys: 0 }); return true; }
     if(RE.meter.test(t)){ closeOpen(); open('meter', no, { count: 0 }); return true; }
+    if(RE.tcStart.test(t)){ closeOpen(); open('turncheck', no, { turns: [], verdict: [], table: [] }); return true; }
     if(RE.motor.test(t)){ closeOpen(); open('motor', no, { count: 0 }); return true; }
     if(RE.simResult.test(t)){ closeOpen(); open('simresult', no, {}); R.sim++; return true; }
     return false;
@@ -480,13 +523,18 @@ function analyseRun(recs, opts){
   opts = opts || {};
   var A = { diag: [], legs: { row: [], col: [] }, turns: {}, oneEnd: [], counts: {}, start: null, done: null, fault: null };
   var c = A.counts;
-  ['CROSS','REJECT','CREDIT','ENDLOST','TURN','PICK','PLACE','RETRY','FAULT','DONE','UNKNOWN','RESTART','TRACE','MISSED','HALF','POWER']
+  ['CROSS','REJECT','CREDIT','ENDLOST','TURN','PICK','PLACE','RETRY','FAULT','DONE','UNKNOWN','RESTART','TRACE','MISSED','HALF','POWER','RECTURN','RECMARK']
     .forEach(function(k){ c[k] = 0; });
-  var heading = null;
+  var heading = null, fromStop = true, after = 0;
   if(opts.live) heading = 0;
   for(var i = 0; i < recs.length; i++){
     var r = recs[i];
     c[r.type] = (c[r.type] || 0) + 1;
+    /* a leg that starts from a stop (the start, a turn, a pick or place) measures longer on a real
+     * robot than one driven through at speed: compare like with like */
+    if(r.type === 'START' || r.type === 'TURN' || r.type === 'PICK' || r.type === 'PLACE' || r.type === 'RETRY') fromStop = true;
+    if(r.type === 'START' || r.type === 'PICK' || r.type === 'PLACE' || r.type === 'RETRY') after = 0;
+    if(r.type === 'TURN') after = r.deg;
     if(r.type === 'START'){ A.start = r; heading = 0; }
     if(r.type === 'DONE') A.done = r;
     if(r.type === 'FAULT') A.fault = r;
@@ -501,9 +549,12 @@ function analyseRun(recs, opts){
     if(r.type === 'CROSS' && r.d != null && r.exp != null && r.exp > 3){
       r.ratio = r.d / r.exp;
       r.axis = heading == null ? null : (heading % 180 === 0 ? 'row' : 'col');
+      r.fromStop = fromStop;
+      r.after90 = fromStop && after === 90;
       if(r.axis) A.legs[r.axis].push(r);
       if(oneEnd(r.mask)){ r.oneEnd = true; A.oneEnd.push(r); }
     }
+    if(r.type === 'CROSS'){ fromStop = false; after = 0; }
   }
   A.last = recs.length ? recs[recs.length - 1] : null;
   var tl = null;
@@ -517,6 +568,10 @@ function analyseRun(recs, opts){
     var diffs = L.map(function(r){ return r.d - r.exp; });
     var g = { n: L.length, ratio: mean(L.map(function(r){ return r.ratio; })), diff: mean(diffs) };
     g.same = L.length ? Math.max(diffs.filter(function(d){ return d > 0; }).length, diffs.filter(function(d){ return d < 0; }).length) / L.length : 0;
+    /* the legs that start right after a 90 degree turn: the same start and the same length
+     * (16.4 cm) in both directions */
+    var S = L.filter(function(r){ return r.after90; });
+    g.t90 = { n: S.length, diff: mean(S.map(function(r){ return r.d - r.exp; })) };
     A.legs[ax + 'Stat'] = g;
     all = all.concat(L);
   });
@@ -533,9 +588,16 @@ function analyseRun(recs, opts){
     var cellNote = function(g, name, def, other){
       if(!g || g.n < 2 || g.diff == null) return;
       var rel = (other && other.n >= 2 && other.diff != null) ? g.diff - other.diff : g.diff;
+      /* a leg that starts from a stop measures long on a real robot (it speeds up, and a 180
+       * does not end exactly on the crossing), and every column leg starts from a stop while most
+       * MID legs are driven through. So compare the legs right after a 90 degree turn, in both
+       * directions, when there are enough of them. */
+      var like = other && g.t90.n >= 2 && other.t90.n >= 2;
+      if(like) rel = g.t90.diff - other.t90.diff;
       if(Math.abs(g.diff) >= 1.5 && g.same >= 0.75 && Math.abs(rel) >= 1.2){
         D('warn', name + ' legs measure ' + sgn(g.diff) + r1(g.diff) + ' cm against expected on average (' + g.n + ' legs, ratio ' + r2(g.ratio) + ')' +
-          (other && other.n >= 2 ? ', the other direction ' + sgn(other.diff) + r1(other.diff) + ' cm' : '') + '. ' +
+          (like ? ', the ones right after a 90 degree turn ' + sgn(g.t90.diff) + r1(g.t90.diff) + ' cm against ' + sgn(other.t90.diff) + r1(other.t90.diff) + ' cm the other direction'
+                : other && other.n >= 2 ? ', the other direction ' + sgn(other.diff) + r1(other.diff) + ' cm' : '') + '. ' +
           def + ' is probably about ' + r1(Math.abs(rel)) + ' cm too ' + (rel > 0 ? 'small' : 'big') +
           ': measure it on the field, centre of line to centre of line.');
       }
@@ -560,16 +622,36 @@ function analyseRun(recs, opts){
       '). A real crossing lights both ends; one end means driving along the wrong line or off to one side. At the edge of the field only the field side has to light.');
   if(c.REJECT) D('warn', c.REJECT + ' crossing(s) came far too early and were not counted (a double count avoided): check the bar height and the line edges.');
   if(c.CREDIT) D('warn', c.CREDIT + ' crossing(s) were missed and counted anyway: the bar did not see a whole crossing (faint tape, speed, a sensor).');
+  if(c.RECMARK) D('warn', c.RECMARK + ' time(s) a crossing with only one end of the bar lit came before the crossing was due and was not counted (a mark beside the line, or worn tape): the robot went on instead of stopping with FAULT 3. Look at the tape there.');
+  recs.forEach(function(r, i){
+    if(r.type !== 'RECTURN') return;
+    /* a run log record says if it found the line; the live trace line does not
+     * (its d, m and ahead are the last crossing's): there FAULT 7 comes next if not */
+    var log = r.what == null, found = r.found, j;
+    if(!log){
+      for(j = i + 1; j < recs.length && recs[j].type !== 'TURN' && recs[j].type !== 'FAULT'; j++);
+      found = !(j < recs.length && recs[j].type === 'FAULT' && recs[j].code === 7);
+    }
+    D(found ? 'warn' : 'bad', 'n=' + r.n + ': after the turn the line was not in the middle of the bar' + (log ? ' (' + r.mask + ')' : '') +
+      (r.moved ? ', the bar saw nothing so it drove 3 cm on first' : '') + '; one more try with longer nudges ' +
+      (found ? 'found it' + (log ? ' (' + r.after + ')' : '') + '. ' +
+        (r.moved ? 'Where the turn stopped the bar saw no line at all: a gap in the tape there?'
+                 : 'The short nudges did not move the robot: the motors need more to start (a tired battery? calibrate again).')
+             : 'did not find it: FAULT 7.'));
+  });
   if(c.RETRY) D('warn', c.RETRY + ' time(s) there was line ahead where the column should end: it went on to the next crossing.');
 
   /* start: light and calibration */
   if(A.start){
     var s = A.start;
-    if(s.cal === 0) D('warn', 'This run used the DEFAULT values (cal=0): run MODE_CALIBRATE once.');
+    if(s.cal === 0) D('warn', 'Not calibrated (cal=0): the levels and numbers written in calibration.h were used. Run MODE_CALIBRATE (e33_calibrate) once for good turns.');
     if(s.light != null && s.cal !== 0){
       var L2 = Math.abs(s.light);
-      if(L2 >= 150) D('bad', 'light=' + s.light + ': the white under the bar at the start was far from the calibrated white. Calibrate in this light (sunlight, other lamps).');
-      else if(L2 >= 60) D('warn', 'light=' + s.light + ': the white at the start differed from the calibration. If it misbehaves here, calibrate in this light.');
+      /* the robot warns at a quarter of the white-to-black step (about 225 with 970 black);
+       * with the line under the middle the white beside it reads up to 230 above plain white,
+       * so a normal start can give light= 100 to 180 */
+      if(L2 >= 225) D('bad', 'light=' + s.light + ': the white under the bar at the start was far from the calibrated white. Calibrate in this light (sunlight, other lamps).');
+      else if(L2 >= 190) D('warn', 'light=' + s.light + ': the white at the start differed from the calibration. If it misbehaves here, calibrate in this light.');
     }
   }
   if(A.done){
@@ -610,13 +692,14 @@ function runEnd(b, A){
 function liveEnd(b, A){
   if(b.log && b.log.thisRun) return { level: 'info', text: 'The run log printed at the end of this run is shown in its own card.' };
   if(A.fault) return { level: 'bad', text: 'Stopped with FAULT ' + A.fault.code + (A.fault.n != null ? ' at n=' + A.fault.n : '') + ': ' + (A.fault.why || '') };
+  if(!b.go && b.afterLog) return { level: 'info', text: 'It did not drive: it waited at the start, ' + waitReason(b) + ' That is normal when you lifted it to read the run log.' };
   if(!b.go) return { level: 'warn', text: 'It never started: ' + waitReason(b) };
   return { level: 'info', text: 'The paste ends while it was driving (no DONE or FAULT after it).' };
 }
 function waitReason(b){
   var w = b.wait[b.wait.length - 1];
   if(!w) return 'no bar reading printed.';
-  if(/line OK/.test(w.msg)) return 'the bar saw the line (line OK), it should go after 1.5 s (5 s after an unfinished run).';
+  if(/line OK/.test(w.msg)) return 'the bar saw the line (line OK), it should go after 0.2 s (5 s after an unfinished run).';
   return 'the bar showed ' + w.mask + ' (' + w.msg + ').';
 }
 
@@ -632,8 +715,9 @@ function analyseCal(b){
     D.unshift({ level: 'bad', text: 'Calibration STOPPED during ' + b.stopped + (b.stopWhy ? ' (' + b.stopWhy + ')' : '') + '.' +
       (T ? ' Why: ' + T[0] + '. What to do: ' + T[1] + '.' : '') + ' Do not paste these values.' });
   }
+  if(b.eepromOff) D.push({ level: 'warn', text: 'CAL_USE_EEPROM is 0 in calibration.h: e33_mission does not use this calibration. Paste its block into calibration.h, or set CAL_USE_EEPROM back to 1 (then copy_settings.bat).' });
   if(b.saved === 'READ BACK FAILED') D.push({ level: 'bad', text: 'EEPROM read back FAILED: the saved calibration is not reliable.' });
-  if(b.noEnd) D.push({ level: 'warn', text: 'The report is cut off: copy from "=== CALIBRATION REPORT" down to "end CAL VALUES" and the line after it.' });
+  if(b.noEnd) D.push({ level: 'warn', text: 'The report is cut off: copy from "=== CALIBRATION REPORT" down to "end CAL VALUES".' });
   if(!D.length && b.items.length) D.push({ level: 'ok', text: 'Every item PASS or WEAK' + (b.finished ? ', finished and saved.' : '.') });
   return D;
 }
@@ -706,7 +790,7 @@ function bootLeadsToMission(R, b){
   for(; i < R.blocks.length && R.blocks[i].kind !== 'boot'; i++){
     var k = R.blocks[i].kind;
     if(k === 'live' || k === 'runlog') return true;
-    if(k === 'calrun' || k === 'calreport' || k === 'sensorcheck' || k === 'sensor' || k === 'gripper' || k === 'meter' || k === 'motor') return false;
+    if(k === 'calrun' || k === 'calreport' || k === 'sensorcheck' || k === 'sensor' || k === 'gripper' || k === 'meter' || k === 'motor' || k === 'turncheck') return false;
   }
   return true;
 }
@@ -721,6 +805,8 @@ function analyse(R){
       var key = b.recs.map(function(r){ return r.raw || r.type; }).join('|');
       if(seen[key] && b.recs.length) b.same = seen[key]; else seen[key] = b;
     }else if(b.kind === 'live'){
+      var bi = R.blocks.indexOf(b);
+      b.afterLog = bi > 0 && R.blocks[bi - 1].kind === 'runlog' && !R.blocks[bi - 1].thisRun;
       b.A = analyseRun(b.recs, { live: true });
       if(b.selfLevels) b.A.diag.unshift({ level: 'info', text: 'The default levels missed the line; it measured white ' + b.selfLevels.white + ' and line ' + b.selfLevels.line + ' standing still.' });
       if(b.lightWarn) b.A.diag.unshift({ level: 'warn', text: 'WARNING at the start: not the light of the calibration. Calibrate here.' });
@@ -738,6 +824,16 @@ function analyse(R){
       b.cross.forEach(function(c){ if(c.r < 0.85 || c.r > 1.15) b.diag.push({ level: 'warn', text: 'Calibration crossing ' + c.k + ' at x' + c.r + ' the expected distance.' }); });
       if(!b.report && !b.stopped && !R.blocks.some(function(x){ return x.kind === 'calreport' && x.line > b.line; }))
         b.diag.push({ level: 'info', text: 'No calibration report in the paste: plug in USB after the run and copy "=== CALIBRATION REPORT" to "end CAL VALUES".' });
+    }
+    else if(b.kind === 'turncheck'){
+      b.diag = [];
+      var bad = b.turns.filter(function(x){ return x.status !== 'OK'; });
+      b.verdict.forEach(function(v){
+        b.diag.push({ level: /^STOPPED/.test(v) ? 'bad' : /^all turns OK: the turns are ready/.test(v) ? 'ok' : 'warn', text: 'Turn check: ' + v });
+      });
+      if(bad.length) b.diag.push({ level: 'warn', text: 'Turn check: ' + bad.length + ' of ' + b.turns.length + ' turns not OK (' +
+        bad.slice(0, 6).map(function(x){ return 'turn ' + x.i + ' ' + x.name + ' ' + x.status; }).join(', ') + ').' });
+      if(!b.report) b.diag.push({ level: 'info', text: 'The turn check report (BEGIN ... END) is not in the paste' + (b.turns.length ? ' (' + b.turns.length + ' turns so far)' : '') + '.' });
     }
     else if(b.kind === 'sensorcheck'){
       b.diag = [];
@@ -759,6 +855,7 @@ function blockTitle(b){
     case 'gripper': return 'Gripper check';
     case 'meter': return 'Sensor meter (MODE_METER)';
     case 'motor': return 'Motor check (MODE_MOTOR_CHECK)';
+    case 'turncheck': return 'Turn check (MODE_TURN_CHECK)';
     case 'simresult': return 'Simulator result';
   }
   return b.kind;
@@ -811,6 +908,9 @@ function summary(R){
       o.push(head + b.prints.filter(function(p){ return p.grip != null; }).map(function(p){ return 'g' + p.grip + '/a' + p.arm + (p.bar ? ' [' + p.bar.join(' ') + ']' : ''); }).join('; '));
     }else if(b.kind === 'sensorcheck'){
       o.push(head + 'got to step ' + b.step + ' of 4' + (b.seen ? ', step 2 seen ' + b.seen : ''));
+    }else if(b.kind === 'turncheck'){
+      o.push(head + b.turns.length + ' turns, ' + b.turns.filter(function(x){ return x.status !== 'OK'; }).length + ' not OK' + (b.report ? '' : ', no report'));
+      b.table.forEach(function(x){ o.push('    ' + x); });
     }else{
       o.push(head + (b.count || 0) + ' lines, not analysed');
     }
@@ -867,7 +967,7 @@ function cls(ratio, lo, hi){ if(ratio == null) return ''; return (ratio < lo || 
 var r1 = E33.r1, r2 = E33.r2;
 var EV = { START: 'start', CROSS: 'crossing', REJECT: 'not counted: too early', CREDIT: 'missed one: counted it',
   ENDLOST: 'end found (line ran out)', RETRY: 'line ahead at an end: retry', DONE: 'DONE', RESTART: 'RESTARTED here',
-  MISSED: 'missed', HALF: 'half crossing', TRACE: 'trace' };
+  MISSED: 'missed', HALF: 'half crossing', TRACE: 'trace', RECTURN: 'RECOVERY after the turn: longer nudges', RECMARK: 'RECOVERY: half crossing not counted (a mark?)' };
 
 function recRow(r){
   var ev, meas = '', ratio = '', rc = '', mask = r.mask || '', mc = '', ahead = r.ahead || '', v = r.v != null ? r2(r.v) : '', tr = '';
@@ -892,6 +992,10 @@ function recRow(r){
   }else if(r.type === 'DONE'){
     ev = 'DONE rejected=' + r.rejected + ' missed-counted=' + r.credited + ' retries=' + r.retries; tr = 'end';
     meas = 'speed x' + r2(r.speed); if(r.speed != null && r.speed < 0.8) rc = 'bad';
+  }else if(r.type === 'RECTURN' && r.what == null){   /* (the live trace line: below) */
+    ev = 'RECOVERY after the turn: longer nudges' + (r.moved ? ', drove 3 cm on first' : '') + (r.found ? ': found the line' : ': no line');
+    rc = r.found ? 'warn' : 'bad'; ratio = r.found ? 'found' : 'none';
+    ahead = 'bar after ' + (r.after || '?'); tr = r.found ? '' : 'end';
   }else if(r.type === 'UNKNOWN'){
     ev = r.raw;
   }else{
@@ -901,7 +1005,7 @@ function recRow(r){
     if(r.ratio != null){ ratio = r2(r.ratio); rc = cls(r.ratio, 0.85, 1.15); }
     if(r.axis) ev += r.axis === 'row' ? ' (MID)' : ' (column)';
     if(r.oneEnd) mc = 'warn';
-    if(r.type === 'REJECT' || r.type === 'CREDIT' || r.type === 'MISSED' || r.type === 'HALF') tr = 'end';
+    if(r.type === 'REJECT' || r.type === 'CREDIT' || r.type === 'MISSED' || r.type === 'HALF' || r.type === 'RECMARK') tr = 'end';
   }
   var ex = r.extra ? Object.keys(r.extra).map(function(k){ return k + '=' + r.extra[k]; }).join(' ') : '';
   if(ex) ev += ' [' + ex + ']';
@@ -991,6 +1095,13 @@ function card(b){
   }else if(b.kind === 'sensorcheck'){
     h += kv([['last step', b.step ? b.step + ' of 4' : ''], ['step 2 seen so far', b.seen ? esc(b.seen) : '']]);
     h += diagList(b.diag);
+  }else if(b.kind === 'turncheck'){
+    h += diagList(b.diag);
+    if(b.table.length) h += '<pre>' + esc(b.table.join('\n')) + '</pre>';
+    h += table(['turn', 'kind', 'ms', 'expected', 'status'], b.turns.map(function(x){
+      return '<tr><td class="num">' + x.i + '</td><td>' + esc(x.name) + '</td><td class="num">' + x.ms + '</td><td class="num">' + x.exp +
+        '</td><td class="' + (x.status === 'OK' ? 'ok' : 'warn') + '">' + esc(x.status) + '</td></tr>';
+    }));
   }else if(b.kind === 'gripper'){
     h += diagList(b.diag);
     h += table(['gripper', 'arm', 'GRIP_CLOSED if the jaws touch', 'bar A0..A7'], b.prints.map(function(p){
